@@ -40,6 +40,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'crypto';
 
@@ -84,9 +85,12 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight.`;
 let _store = null;
 let _kg = null;
 
-function getStore() {
+async function getStore() {
   if (!_store) {
-    _store = new VectorStore();
+    _store = new VectorStore({
+      qdrantUrl: process.env.QDRANT_URL || 'http://localhost:6333',
+    });
+    await _store.init();
   }
   return _store;
 }
@@ -110,7 +114,7 @@ function noPalace() {
 // ── Read Tool Handlers ──────────────────────────────────────────────────────
 
 async function toolStatus() {
-  const store = getStore();
+  const store = await getStore();
   let count;
   try {
     count = await store.count();
@@ -142,7 +146,7 @@ async function toolStatus() {
 }
 
 async function toolListWings() {
-  const store = getStore();
+  const store = await getStore();
   let allMeta;
   try {
     allMeta = await store.get({ limit: 10000 });
@@ -159,7 +163,7 @@ async function toolListWings() {
 }
 
 async function toolListRooms({ wing } = {}) {
-  const store = getStore();
+  const store = await getStore();
   const opts = { limit: 10000 };
   if (wing) {
     opts.where = { wing };
@@ -181,7 +185,7 @@ async function toolListRooms({ wing } = {}) {
 }
 
 async function toolGetTaxonomy() {
-  const store = getStore();
+  const store = await getStore();
   let allMeta;
   try {
     allMeta = await store.get({ limit: 10000 });
@@ -200,12 +204,12 @@ async function toolGetTaxonomy() {
 }
 
 async function toolSearch({ query, limit = 5, wing, room }) {
-  const store = getStore();
+  const store = await getStore();
   return searchMemories(query, store, { wing, room, nResults: limit });
 }
 
 async function toolCheckDuplicate({ content, threshold = 0.9 }) {
-  const store = getStore();
+  const store = await getStore();
   try {
     const results = await store.query({
       queryTexts: [content],
@@ -248,7 +252,7 @@ function toolGetAaakSpec() {
 // ── Write Tool Handlers ─────────────────────────────────────────────────────
 
 async function toolAddDrawer({ wing, room, content, source_file, added_by = 'mcp' }) {
-  const store = getStore();
+  const store = await getStore();
 
   // Duplicate check
   const dup = await toolCheckDuplicate({ content, threshold: 0.9 });
@@ -289,7 +293,7 @@ async function toolAddDrawer({ wing, room, content, source_file, added_by = 'mcp
 }
 
 async function toolDeleteDrawer({ drawer_id }) {
-  const store = getStore();
+  const store = await getStore();
   try {
     // Try to get existing first
     const existing = await store.get({ where: { original_id: drawer_id }, limit: 1 });
@@ -344,7 +348,7 @@ function toolKgStats() {
 // ── Navigation Tool Handlers ────────────────────────────────────────────────
 
 async function toolTraverse({ start_room, max_hops = 2 }) {
-  const store = getStore();
+  const store = await getStore();
   try {
     return await traverse(start_room, store, max_hops);
   } catch {
@@ -353,7 +357,7 @@ async function toolTraverse({ start_room, max_hops = 2 }) {
 }
 
 async function toolFindTunnels({ wing_a, wing_b } = {}) {
-  const store = getStore();
+  const store = await getStore();
   try {
     return await findTunnels(store, wing_a, wing_b);
   } catch {
@@ -362,7 +366,7 @@ async function toolFindTunnels({ wing_a, wing_b } = {}) {
 }
 
 async function toolGraphStats() {
-  const store = getStore();
+  const store = await getStore();
   try {
     return await graphStats(store);
   } catch {
@@ -373,7 +377,7 @@ async function toolGraphStats() {
 // ── Diary Tool Handlers ─────────────────────────────────────────────────────
 
 async function toolDiaryWrite({ agent_name, entry, topic = 'general' }) {
-  const store = getStore();
+  const store = await getStore();
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
   const room = 'diary';
   const now = new Date();
@@ -415,7 +419,7 @@ async function toolDiaryWrite({ agent_name, entry, topic = 'general' }) {
 }
 
 async function toolDiaryRead({ agent_name, last_n = 10 }) {
-  const store = getStore();
+  const store = await getStore();
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
 
   try {
@@ -741,21 +745,21 @@ async function startStdio() {
 }
 
 async function startHTTP() {
-  const Fastify = (await import('fastify')).default;
-  const app = Fastify({ logger: true });
+  const http = await import('http');
 
   const transports = {};
 
-  app.post('/mcp', async (request, reply) => {
-    const sessionId = request.headers['mcp-session-id'];
-
+  function getOrCreateTransport(sessionId) {
     if (sessionId && transports[sessionId]) {
-      await transports[sessionId].handleRequest(request.raw, reply.raw, request.body);
-      return reply;
+      return transports[sessionId];
     }
+    return null;
+  }
 
+  async function createNewSession() {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
+      enableJsonResponse: true,
     });
 
     transport.onclose = () => {
@@ -766,36 +770,77 @@ async function startHTTP() {
     const server = createServer();
     await server.connect(transport);
 
-    if (transport.sessionId) {
-      transports[transport.sessionId] = transport;
+    return transport;
+  }
+
+  const httpServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (url.pathname === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+      return;
     }
 
-    await transport.handleRequest(request.raw, reply.raw, request.body);
-    return reply;
-  });
+    if (url.pathname === '/mcp') {
+      try {
+        const sessionId = req.headers['mcp-session-id'];
 
-  app.get('/mcp', async (request, reply) => {
-    const sessionId = request.headers['mcp-session-id'];
-    if (sessionId && transports[sessionId]) {
-      await transports[sessionId].handleRequest(request.raw, reply.raw);
-      return reply;
+        if (req.method === 'POST') {
+          let body = '';
+          for await (const chunk of req) body += chunk;
+          const parsed = JSON.parse(body);
+
+          let transport = getOrCreateTransport(sessionId);
+
+          if (!transport) {
+            if (isInitializeRequest(parsed)) {
+              transport = await createNewSession();
+              await transport.handleRequest(req, res, parsed);
+              if (transport.sessionId) {
+                transports[transport.sessionId] = transport;
+              }
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                jsonrpc: '2.0',
+                error: { code: -32000, message: 'Bad Request: No valid session. Send initialize first.' },
+                id: null,
+              }));
+            }
+            return;
+          }
+
+          await transport.handleRequest(req, res, parsed);
+        } else if (req.method === 'GET' || req.method === 'DELETE') {
+          const transport = getOrCreateTransport(sessionId);
+          if (transport) {
+            await transport.handleRequest(req, res);
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing or invalid session' }));
+          }
+        } else {
+          res.writeHead(405);
+          res.end();
+        }
+      } catch (e) {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+      return;
     }
-    reply.code(400).send({ error: 'Missing or invalid session' });
-  });
 
-  app.delete('/mcp', async (request, reply) => {
-    const sessionId = request.headers['mcp-session-id'];
-    if (sessionId && transports[sessionId]) {
-      await transports[sessionId].handleRequest(request.raw, reply.raw);
-      return reply;
-    }
-    reply.code(400).send({ error: 'Missing or invalid session' });
+    res.writeHead(404);
+    res.end();
   });
-
-  app.get('/health', async () => ({ status: 'ok' }));
 
   const port = parseInt(process.env.MCP_PORT || '3100', 10);
-  await app.listen({ port, host: '0.0.0.0' });
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`MemPalace MCP Server (http) listening on port ${port}`);
+  });
 }
 
 export async function main() {
