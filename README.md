@@ -118,7 +118,7 @@ npm test
 
 ## Credits
 
-This project is a Node.js port of [MemPalace](https://github.com/igorls/mempalace) originally created by [milla-jovovich](https://github.com/milla-jovovich) and [igorls](https://github.com/igorls). The original Python implementation achieved 96.6% R@5 on LongMemEval — the highest published score for any AI memory system without API keys.
+This project is a Node.js port of [MemPalace](https://github.com/igorls/mempalace) originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). The original Python implementation achieved 96.6% R@5 on LongMemEval — the highest published score for any AI memory system without API keys.
 
 **Key changes in this port:**
 - Python → Node.js (ESM)
