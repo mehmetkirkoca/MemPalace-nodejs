@@ -36,6 +36,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -732,11 +733,77 @@ export function createServer() {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-export async function main() {
+async function startStdio() {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MemPalace MCP Server starting...');
+  console.error('MemPalace MCP Server (stdio) starting...');
+}
+
+async function startHTTP() {
+  const Fastify = (await import('fastify')).default;
+  const app = Fastify({ logger: true });
+
+  const transports = {};
+
+  app.post('/mcp', async (request, reply) => {
+    const sessionId = request.headers['mcp-session-id'];
+
+    if (sessionId && transports[sessionId]) {
+      await transports[sessionId].handleRequest(request.raw, reply.raw, request.body);
+      return reply;
+    }
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid) delete transports[sid];
+    };
+
+    const server = createServer();
+    await server.connect(transport);
+
+    if (transport.sessionId) {
+      transports[transport.sessionId] = transport;
+    }
+
+    await transport.handleRequest(request.raw, reply.raw, request.body);
+    return reply;
+  });
+
+  app.get('/mcp', async (request, reply) => {
+    const sessionId = request.headers['mcp-session-id'];
+    if (sessionId && transports[sessionId]) {
+      await transports[sessionId].handleRequest(request.raw, reply.raw);
+      return reply;
+    }
+    reply.code(400).send({ error: 'Missing or invalid session' });
+  });
+
+  app.delete('/mcp', async (request, reply) => {
+    const sessionId = request.headers['mcp-session-id'];
+    if (sessionId && transports[sessionId]) {
+      await transports[sessionId].handleRequest(request.raw, reply.raw);
+      return reply;
+    }
+    reply.code(400).send({ error: 'Missing or invalid session' });
+  });
+
+  app.get('/health', async () => ({ status: 'ok' }));
+
+  const port = parseInt(process.env.MCP_PORT || '3100', 10);
+  await app.listen({ port, host: '0.0.0.0' });
+}
+
+export async function main() {
+  if (process.env.MCP_TRANSPORT === 'http') {
+    await startHTTP();
+  } else {
+    await startStdio();
+  }
 }
 
 // Run if executed directly

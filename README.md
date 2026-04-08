@@ -81,10 +81,45 @@ tests/          — test suite
 
 ## Docker
 
-Qdrant vector database runs as a Docker service:
+Start all services with a single command:
 
 ```bash
-docker compose up -d qdrant
+docker compose up -d
+```
+
+This starts the following services:
+
+| Service | Port | Description |
+|---------|------|-------------|
+| **qdrant** | 6335 | Qdrant vector database |
+| **mempalace-mcp** | 3100 | MCP Server (StreamableHTTP) |
+
+### CLI Usage
+
+CLI runs on-demand — executes the command, exits, and the container is automatically removed:
+
+```bash
+docker compose run --rm mempalace-cli bin/mempalace.js status
+docker compose run --rm mempalace-cli bin/mempalace.js search "query"
+docker compose run --rm mempalace-cli bin/mempalace.js mine ~/projects/my_app
+```
+
+### Development Mode
+
+Source code is volume-mounted, changes are reflected immediately:
+
+```bash
+docker compose --profile dev up
+```
+
+### MCP Server (Docker)
+
+MCP server runs at `http://localhost:3100/mcp` using StreamableHTTP transport. Claude Desktop and other MCP clients can connect to this endpoint.
+
+Local usage via stdio transport is also supported:
+
+```bash
+node src/mcpServer.js
 ```
 
 ## Running Benchmarks
@@ -109,16 +144,16 @@ node benchmarks/longmemevalBench.js /tmp/longmemeval.json --limit 5
 ## Development
 
 ```bash
-git clone <repo-url>
-cd mempalace
+git clone https://github.com/mehmetkirkoca/MemPalace-nodejs.git
+cd MemPalace-nodejs
 npm install
-docker compose up -d qdrant
+docker compose up -d
 npm test
 ```
 
 ## Credits
 
-This project is a Node.js port of [MemPalace](https://github.com/igorls/mempalace) originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). The original Python implementation achieved 96.6% R@5 on LongMemEval — the highest published score for any AI memory system without API keys.
+This project is a Node.js port of [MemPalace](https://github.com/milla-jovovich/mempalace) originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). The original Python implementation achieved 96.6% R@5 on LongMemEval — the highest published score for any AI memory system without API keys.
 
 **Key changes in this port:**
 - Python → Node.js (ESM)

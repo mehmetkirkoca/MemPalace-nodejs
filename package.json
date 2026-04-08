@@ -16,11 +16,12 @@
     "start:mcp": "node src/mcpServer.js"
   },
   "dependencies": {
-    "@qdrant/qdrant-js": "^1.12.0",
     "@huggingface/transformers": "^3.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@qdrant/qdrant-js": "^1.12.0",
     "better-sqlite3": "^11.8.0",
     "commander": "^13.1.0",
+    "fastify": "^5.8.4",
     "js-yaml": "^4.1.0"
   },
   "devDependencies": {

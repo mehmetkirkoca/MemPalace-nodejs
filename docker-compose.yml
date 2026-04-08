@@ -1,18 +1,79 @@
-version: "3.8"
+name: mempalace
+
 services:
   qdrant:
     image: qdrant/qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6335:6333"
+      - "6336:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
 
+  mempalace-mcp:
+    build:
+      context: .
+      target: prod
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - MCP_TRANSPORT=http
+      - MCP_PORT=3100
+    ports:
+      - "3100:3100"
+    volumes:
+      - mempalace_data:/root/.mempalace
+      - mempalace_hf_cache:/root/.cache/huggingface
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    command: ["src/mcpServer.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/3100'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  mempalace-cli:
+    build:
+      context: .
+      target: prod
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - mempalace_data:/root/.mempalace
+      - mempalace_hf_cache:/root/.cache/huggingface
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles: ["cli"]
+    stdin_open: true
+    tty: true
+
+  mempalace-dev:
+    build:
+      context: .
+      target: dev
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - mempalace_data:/root/.mempalace
+      - mempalace_hf_cache:/root/.cache/huggingface
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles: ["dev"]
+    stdin_open: true
+    tty: true
+
 volumes:
   qdrant_data:
+  mempalace_data:
+  mempalace_hf_cache:
