@@ -1,0 +1,33 @@
+{
+  "name": "mempalace",
+  "version": "3.0.0",
+  "description": "AI memory system — store everything verbatim, make it findable through structure",
+  "type": "module",
+  "bin": {
+    "mempalace": "./bin/mempalace.js"
+  },
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start:mcp": "node src/mcpServer.js"
+  },
+  "dependencies": {
+    "@qdrant/qdrant-js": "^1.12.0",
+    "@huggingface/transformers": "^3.4.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.8.0",
+    "commander": "^13.1.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}
