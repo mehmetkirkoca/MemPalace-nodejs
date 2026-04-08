@@ -1,153 +1,116 @@
 # MemPalace
 
-AI memory system — store everything verbatim, make it findable through structure.
+Give your AI a long-term memory. MemPalace stores everything you tell it, organizes it automatically, and makes it findable — across sessions, projects, and time.
 
-### Benchmark Results (Node.js Port — 2026-04-08)
-
-| Benchmark | Questions | Recall@5 | Recall@10 | Time |
-|-----------|-----------|----------|-----------|------|
-| **LongMemEval** (Microsoft) | 500 | **96.0%** | **98.4%** | 36 min |
-| **LoCoMo** (Snap Research) | 1,986 | — | **100%** | 3.6 min |
-| **ConvoMem** (Salesforce) | 500 | — | **92.0%** | 16 min |
-
-**LongMemEval Per-Category Breakdown:**
-
-| Category | R@10 | Questions |
-|----------|------|-----------|
-| knowledge-update | 100% | 78 |
-| multi-session | 100% | 133 |
-| temporal-reasoning | 98.5% | 133 |
-| single-session-preference | 96.7% | 30 |
-| single-session-assistant | 96.4% | 56 |
-| single-session-user | 95.7% | 70 |
-
-Fully local, no API key required, $0 cost. Benchmark runners in `benchmarks/`.
+No API key required. Runs entirely on your machine.
 
 ---
 
-## Install
+## Why MemPalace?
 
-```bash
-npm install mempalace
-```
+Most AI assistants forget everything the moment a conversation ends. MemPalace fixes that by giving Claude (or any MCP-compatible AI) a persistent, searchable memory palace — stored locally, organized semantically.
 
-Requires Node.js >= 20.
+- **Remembers decisions** — "why did we choose this architecture?"
+- **Tracks preferences** — "I always use tabs, not spaces"
+- **Logs milestones** — "the auth bug was finally fixed on 2026-04-03"
+- **Connects facts** — knowledge graph links people, projects, and events
 
-## Quick Start
+### Benchmark Results
 
-```bash
-# Initialize a palace from a project folder
-mempalace init ~/projects/my_app
+| Benchmark | Recall@10 | Questions |
+|-----------|-----------|-----------|
+| **LongMemEval** (Microsoft) | **98.4%** | 500 |
+| **LoCoMo** (Snap Research) | **100%** | 1,986 |
+| **ConvoMem** (Salesforce) | **92.0%** | 500 |
 
-# Mine files into memory
-mempalace mine ~/projects/my_app
+Highest published recall score for a fully local AI memory system.
 
-# Search your memories
-mempalace search "why did we choose this approach"
+---
 
-# Import AI conversations
-mempalace mine ~/claude-sessions/ --mode convos
-```
+## Getting Started
 
-## Usage as Library
-
-```js
-import { searchMemories, getConfig, VectorStore } from 'mempalace';
-
-const config = getConfig();
-const results = await searchMemories('authentication flow', { topK: 5 });
-```
-
-## MCP Server
-
-MemPalace ships with an MCP server for Claude Desktop and other MCP clients:
-
-```bash
-npm run start:mcp
-```
-
-See [examples/mcp_setup.md](examples/mcp_setup.md) for configuration details.
-
-## Project Structure
-
-```
-src/            — core modules
-hooks/          — Claude Code auto-save hooks
-examples/       — usage examples and setup guides
-benchmarks/     — benchmark runners and results
-assets/         — logo and brand
-tests/          — test suite
-```
-
-## Docker
-
-Start all services with a single command:
+### 1. Start the services
 
 ```bash
 docker compose up -d
 ```
 
-This starts the following services:
+This starts MemPalace and its vector database. That's it.
 
-| Service | Port | Description |
-|---------|------|-------------|
-| **qdrant** | 6335 | Qdrant vector database |
-| **mempalace-mcp** | 3100 | MCP Server (StreamableHTTP) |
-
-### CLI Usage
-
-CLI runs on-demand — executes the command, exits, and the container is automatically removed:
-
-```bash
-docker compose run --rm mempalace-cli bin/mempalace.js status
-docker compose run --rm mempalace-cli bin/mempalace.js search "query"
-docker compose run --rm mempalace-cli bin/mempalace.js mine ~/projects/my_app
-```
-
-### Development Mode
-
-Source code is volume-mounted, changes are reflected immediately:
-
-```bash
-docker compose --profile dev up
-```
-
-### MCP Server (Docker)
-
-MCP server runs at `http://localhost:3100/mcp` using StreamableHTTP transport. Claude Desktop and other MCP clients can connect to this endpoint.
-
-Local usage via stdio transport is also supported:
-
-```bash
-node src/mcpServer.js
-```
-
-### Connecting Claude Code (CLI)
-
-The `.mcp.json` file in this repo configures the MCP server automatically for Claude Code users. After starting the Docker stack, register the server once via:
+### 2. Connect Claude Code
 
 ```bash
 claude mcp add --transport http mempalace http://localhost:3100/mcp
 ```
 
-## Running Benchmarks
+Or just open this repo in Claude Code — the included `.mcp.json` will prompt for approval automatically.
+
+### 3. Start a conversation
+
+Claude will now remember things across sessions. On each wake-up it loads your memory palace and queries it before responding. You can also tell it explicitly:
+
+> "Remember that we decided to use Qdrant over ChromaDB because it supports Docker natively."
+
+MemPalace will figure out where to store it.
+
+---
+
+## How Memory is Organized
+
+Everything is stored in a three-level hierarchy:
+
+```
+Wing  →  Room  →  Hall
+────     ─────    ────
+code     docker   facts
+user     health   events
+team     sprint   preferences
+```
+
+- **Wings** are broad domains (code, personal, team, hardware, AI research)
+- **Rooms** are named topics within a wing (e.g. `docker-setup`, `gpu-pricing`)
+- **Halls** are memory types (facts, events, discoveries, preferences, advice)
+
+### Smart Filing with `mempalace_guide`
+
+Not sure where something belongs? Ask the guide tool before storing:
+
+```
+mempalace_guide("we decided to drop ChromaDB and use Qdrant")
+→ wing: wing_code | room: qdrant-chromadb | hall: hall_facts | importance: 3
+```
+
+It runs three checks: content-type detection, existing room matching, and your project config.
+
+---
+
+## MCP Tools
+
+20 tools available to Claude once connected:
+
+| What you can do | Tools |
+|-----------------|-------|
+| Search memories | `mempalace_search`, `mempalace_status` |
+| Store & remove | `mempalace_add_drawer`, `mempalace_delete_drawer` |
+| Smart filing | `mempalace_guide`, `mempalace_check_duplicate` |
+| Knowledge graph | `mempalace_kg_add`, `mempalace_kg_query`, `mempalace_kg_timeline` |
+| Browse structure | `mempalace_list_wings`, `mempalace_list_rooms`, `mempalace_get_taxonomy` |
+| Agent diary | `mempalace_diary_write`, `mempalace_diary_read` |
+| Navigation | `mempalace_traverse`, `mempalace_find_tunnels` |
+
+---
+
+## Using the CLI
+
+Mine an existing project folder into memory:
 
 ```bash
-# LongMemEval (500 questions, ~36 min)
-curl -fsSL -o /tmp/longmemeval.json \
-  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
-node benchmarks/longmemevalBench.js /tmp/longmemeval.json
-
-# LoCoMo (1986 questions, ~4 min)
-git clone https://github.com/snap-research/locomo.git /tmp/locomo
-node benchmarks/locomoBench.js /tmp/locomo/data/locomo10.json
-
-# ConvoMem (auto-downloads from HuggingFace, ~16 min)
-node benchmarks/convomemBench.js --category all --limit 100
-
-# Quick test (5 questions)
-node benchmarks/longmemevalBench.js /tmp/longmemeval.json --limit 5
+docker compose run --rm mempalace-cli bin/mempalace.js mine ~/projects/my_app
+docker compose run --rm mempalace-cli bin/mempalace.js search "authentication flow"
+docker compose run --rm mempalace-cli bin/mempalace.js status
 ```
+
+---
 
 ## Development
 
@@ -159,18 +122,17 @@ docker compose up -d
 npm test
 ```
 
+For live-reload during development:
+
+```bash
+docker compose --profile dev up
+```
+
+---
+
 ## Credits
 
-This project is a Node.js port of [MemPalace](https://github.com/milla-jovovich/mempalace) originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). The original Python implementation achieved 96.6% R@5 on LongMemEval — the highest published score for any AI memory system without API keys.
-
-**Key changes in this port:**
-- Python → Node.js (ESM)
-- ChromaDB (embedded) → Qdrant (Docker service)
-- Built-in embedding → @huggingface/transformers (same all-MiniLM-L6-v2 model)
-- argparse → Commander.js
-- pytest → Vitest
-
-All credit for the architecture, algorithms, AAAK dialect, and benchmark methodology belongs to the original authors.
+Node.js port of [MemPalace](https://github.com/milla-jovovich/mempalace), originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). All credit for the core architecture, AAAK memory dialect, and benchmark methodology belongs to the original authors.
 
 ## License
 

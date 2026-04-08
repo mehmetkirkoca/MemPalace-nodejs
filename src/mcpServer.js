@@ -32,6 +32,9 @@
  * Tools (diary):
  *   mempalace_diary_write     — AAAK diary entry
  *   mempalace_diary_read      — recent entries
+ *
+ * Tools (guide):
+ *   mempalace_guide           — recommend wing/room/hall/importance before filing
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
