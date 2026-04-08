@@ -4,3 +4,20 @@ dist/
 *.log
 coverage/
 .vitest/
+
+# Project config (generated per-project)
+mempalace.yaml
+mempal.yaml
+
+# Benchmark results (generated on each run)
+benchmarks/results_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
