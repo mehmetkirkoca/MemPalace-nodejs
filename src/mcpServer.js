@@ -376,7 +376,7 @@ async function toolGraphStats() {
 
 // ── Diary Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolDiaryWrite({ agent_name, entry, topic = 'general' }) {
+async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general' }) {
   const store = await getStore();
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
   const room = 'diary';
@@ -418,7 +418,7 @@ async function toolDiaryWrite({ agent_name, entry, topic = 'general' }) {
   }
 }
 
-async function toolDiaryRead({ agent_name, last_n = 10 }) {
+async function toolDiaryRead({ agent_name = 'agent', last_n = 10 }) {
   const store = await getStore();
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
 
