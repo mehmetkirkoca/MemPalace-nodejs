@@ -21,15 +21,16 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_graph_stats',
   'mempalace_diary_write',
   'mempalace_diary_read',
+  'mempalace_guide',
 ];
 
 describe('getToolDefinitions', () => {
-  it('19 tool tanımı döner', () => {
+  it('returns 20 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(19);
+    expect(tools).toHaveLength(20);
   });
 
-  it('tüm beklenen tool isimleri mevcut', () => {
+  it('contains all expected tool names', () => {
     const tools = getToolDefinitions();
     const names = tools.map((t) => t.name);
     for (const expected of EXPECTED_TOOL_NAMES) {
@@ -37,7 +38,7 @@ describe('getToolDefinitions', () => {
     }
   });
 
-  it('her tool name, description ve inputSchema içerir', () => {
+  it('each tool has name, description and inputSchema', () => {
     const tools = getToolDefinitions();
     for (const tool of tools) {
       expect(tool).toHaveProperty('name');
@@ -50,7 +51,7 @@ describe('getToolDefinitions', () => {
     }
   });
 
-  it('handler döndürmez (sadece schema)', () => {
+  it('does not expose handler in public schema', () => {
     const tools = getToolDefinitions();
     for (const tool of tools) {
       expect(tool).not.toHaveProperty('handler');
@@ -59,13 +60,13 @@ describe('getToolDefinitions', () => {
 });
 
 describe('TOOLS internal', () => {
-  it('her tool bir handler fonksiyonuna sahip', () => {
+  it('each tool has a handler function', () => {
     for (const tool of TOOLS) {
       expect(typeof tool.handler).toBe('function');
     }
   });
 
-  it('required alanları olan tool\'lar doğru tanımlı', () => {
+  it('tools with required fields are correctly defined', () => {
     const toolMap = {};
     for (const t of TOOLS) toolMap[t.name] = t;
 
@@ -98,16 +99,21 @@ describe('TOOLS internal', () => {
 
     // diary_read: agent_name required
     expect(toolMap.mempalace_diary_read.inputSchema.required).toContain('agent_name');
+
+    // guide: content required, context and hint_wing optional
+    expect(toolMap.mempalace_guide.inputSchema.required).toContain('content');
+    expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('context');
+    expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('hint_wing');
   });
 });
 
 describe('Constants', () => {
-  it('PALACE_PROTOCOL tanımlı ve boş değil', () => {
+  it('PALACE_PROTOCOL is defined and non-empty', () => {
     expect(PALACE_PROTOCOL).toBeTruthy();
     expect(PALACE_PROTOCOL).toContain('MemPalace Memory Protocol');
   });
 
-  it('AAAK_SPEC tanımlı ve boş değil', () => {
+  it('AAAK_SPEC is defined and non-empty', () => {
     expect(AAAK_SPEC).toBeTruthy();
     expect(AAAK_SPEC).toContain('AAAK');
   });

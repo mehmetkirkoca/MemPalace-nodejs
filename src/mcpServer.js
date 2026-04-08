@@ -2,7 +2,7 @@
  * mcpServer.js — MemPalace MCP Server
  * ====================================
  *
- * 19 MCP tool ile palace erişimi sağlar.
+ * 20 MCP tools for palace access.
  *
  * Tools (read):
  *   mempalace_status          — total drawers, wing/room breakdown
@@ -43,6 +43,9 @@ import {
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import yaml from 'js-yaml';
 
 import { VectorStore } from './vectorStore.js';
 import { searchMemories } from './searcher.js';
@@ -80,6 +83,126 @@ EXAMPLE:
 Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.
 When WRITING AAAK: use entity codes, mark emotions, keep structure tight.`;
 
+// ── Guide Patterns (Strategy 1 — content-type classifier) ────────────────────
+
+const GUIDE_PATTERNS = {
+  decision: [
+    /\blet'?s (use|go with|try|pick|choose|switch to)\b/i,
+    /\bwe (decided|chose|went with|picked|settled on)\b/i,
+    /\bwe should\b/i,
+    /\bi'?m going (to|with)\b/i,
+    /\btrade-?off\b/i,
+    /\binstead of\b/i,
+    /\brather than\b/i,
+    /\bpros and cons\b/i,
+    /\barchitecture\b/i,
+    /\bapproach\b/i,
+    /\bchose\b/i,
+  ],
+  preference: [
+    /\bi prefer\b/i,
+    /\balways use\b/i,
+    /\bnever use\b/i,
+    /\bdon'?t (ever )?(use|do|mock|stub)\b/i,
+    /\bplease (always|never|don'?t)\b/i,
+    /\bmy (rule|preference|style|convention) is\b/i,
+    /\bwe (always|never)\b/i,
+  ],
+  milestone: [
+    /\bit works\b/i,
+    /\bit worked\b/i,
+    /\bgot it working\b/i,
+    /\bfixed\b/i,
+    /\bsolved\b/i,
+    /\bbreakthrough\b/i,
+    /\bfigured (it )?out\b/i,
+    /\bfinally\b/i,
+    /\bshipped\b/i,
+    /\bdeployed\b/i,
+    /\breleased\b/i,
+    /\bfirst time\b/i,
+    /\bturns out\b/i,
+  ],
+  problem: [
+    /\b(bug|error|crash|fail|broke|broken|issue|problem)\b/i,
+    /\bdoesn'?t work\b/i,
+    /\bnot working\b/i,
+    /\broot cause\b/i,
+    /\bthe (problem|issue|bug) (is|was)\b/i,
+    /\bthe fix (is|was)\b/i,
+    /\bworkaround\b/i,
+    /\bresolved\b/i,
+  ],
+  emotion: [
+    /\bi feel\b/i,
+    /\bscared\b/i,
+    /\bafraid\b/i,
+    /\bproud\b/i,
+    /\bhappy\b/i,
+    /\bsad\b/i,
+    /\bgrateful\b/i,
+    /\bworried\b/i,
+    /\blonely\b/i,
+    /\bi love\b/i,
+    /\bi miss\b/i,
+    /\bi need\b/i,
+    /\bi wish\b/i,
+    /\*[^*]+\*/,
+  ],
+  advice: [
+    /\byou should\b/i,
+    /\bi recommend\b/i,
+    /\bbest practice\b/i,
+    /\balways\b.*\bwhen\b/i,
+    /\bnever\b.*\bwhen\b/i,
+    /\btip:/i,
+    /\bprotip\b/i,
+    /\blesson learned\b/i,
+    /\bkey insight\b/i,
+  ],
+};
+
+const WING_KEYWORDS = {
+  wing_code: [
+    /\b(code|function|class|api|endpoint|module|refactor|typescript|javascript|python|node|npm|import|export|async|await|promise|git|pull request|pr|merge|branch|deploy|ci|cd|docker|container|kubernetes|k8s|nginx|sql|query|database|schema|migration|test|spec|vitest|jest|lint)\b/i,
+  ],
+  wing_hardware: [
+    /\b(gpu|cpu|ram|disk|ssd|nvme|pcie|server|machine|motherboard|bios|firmware|driver|hardware|monitor|display|cable|port|usb|ethernet|network|router|switch)\b/i,
+  ],
+  wing_ai_research: [
+    /\b(llm|gpt|claude|gemini|embeddings?|vector|rag|fine-?tun|model|training|inference|prompt|context window|tokens?|attention|transformer|hugging ?face|ollama|lmstudio|benchmark|eval|agent|reinforcement)\b/i,
+  ],
+  wing_team: [
+    /\b(team|colleague|coworker|manager|standup|sprint|meeting|review|feedback|hire|onboard|ticket|jira|slack|confluence|retro|roadmap)\b/i,
+  ],
+  wing_user: [
+    /\b(personal|family|health|weekend|vacation|life|relationship|friend|mood|diary|journal)\b/i,
+    /\*[^*]+\*/,
+  ],
+  wing_agent: [
+    /\b(agent|memory palace|mempalace|aaak|drawer|wing|room|hall|palace protocol|knowledge graph)\b/i,
+  ],
+};
+
+const IMPORTANCE_SIGNALS = {
+  high: [
+    /\bcritical\b/i, /\bmust\b/i, /\bimportant\b/i, /\bnever forget\b/i,
+    /\balways remember\b/i, /\bbreaking\b/i, /\bsecurity\b/i,
+    /\bproduction\b/i, /\blive\b/i, /\bdeadline\b/i,
+  ],
+  medium_high: [
+    /\bshipped\b/i, /\bdeployed\b/i, /\breleased\b/i, /\bbreakthrough\b/i,
+    /\bfixed\b/i, /\bsolved\b/i, /\bfinally\b/i,
+  ],
+  medium_low: [
+    /\btried\b/i, /\battempted\b/i, /\bworking on\b/i,
+    /\bexploring\b/i, /\bconsidering\b/i,
+  ],
+  low: [
+    /\bfyi\b/i, /\bjust a note\b/i, /\bminor\b/i, /\btrivial\b/i,
+  ],
+};
+
 // ── Lazy singletons ──────────────────────────────────────────────────────────
 
 let _store = null;
@@ -109,6 +232,140 @@ function noPalace() {
     error: 'No palace found',
     hint: 'Run: mempalace init <dir> && mempalace mine <dir>',
   };
+}
+
+// ── Guide Helpers ─────────────────────────────────────────────────────────────
+
+function _guideScorePatterns(text, patterns) {
+  let count = 0;
+  const matched = [];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) { count++; matched.push(m[0].trim()); }
+  }
+  return { count, matched };
+}
+
+function _guideStrategy1(content, context) {
+  const combined = `${content}\n${context || ''}`;
+  const scores = {};
+  const evidence = {};
+  for (const [type, patterns] of Object.entries(GUIDE_PATTERNS)) {
+    const { count, matched } = _guideScorePatterns(combined, patterns);
+    scores[type] = count;
+    evidence[type] = matched.slice(0, 3);
+  }
+  // Resolved problem → milestone
+  const hasFix = /\b(fixed|solved|resolved|got it working|figured out|the fix)\b/i.test(combined);
+  if (scores.problem > 0 && hasFix && scores.milestone === 0) {
+    scores.milestone = scores.problem;
+    scores.problem = 0;
+  }
+  const winner = Object.entries(scores).reduce(
+    (best, [k, v]) => v > best[1] ? [k, v] : best,
+    ['decision', 0]
+  )[0];
+  const HALL_MAP = {
+    decision: 'hall_facts',
+    preference: 'hall_preferences',
+    milestone: 'hall_events',
+    problem: 'hall_discoveries',
+    emotion: 'hall_facts',
+    advice: 'hall_advice',
+  };
+  const hall = HALL_MAP[winner] || 'hall_facts';
+  const evidenceWords = (evidence[winner] || []).join(', ') || 'no strong signal';
+  return { hall, type: winner, scores, reasoning: `${winner} — detected: ${evidenceWords}` };
+}
+
+function _guideSelectWing(content, context, hintWing, strategy1Type) {
+  const VALID_WINGS = [
+    'wing_user', 'wing_code', 'wing_team', 'wing_myproject',
+    'wing_hardware', 'wing_ai_research', 'wing_agent',
+  ];
+  if (hintWing) {
+    const normalised = hintWing.startsWith('wing_') ? hintWing : `wing_${hintWing}`;
+    if (VALID_WINGS.includes(normalised)) return normalised;
+  }
+  if (strategy1Type === 'emotion') return 'wing_user';
+  const combined = `${content}\n${context || ''}`;
+  const wingScores = {};
+  for (const [wing, patterns] of Object.entries(WING_KEYWORDS)) {
+    const { count } = _guideScorePatterns(combined, patterns);
+    if (count > 0) wingScores[wing] = count;
+  }
+  if (Object.keys(wingScores).length > 0) {
+    return Object.entries(wingScores).reduce(
+      (best, [k, v]) => v > best[1] ? [k, v] : best,
+      ['wing_myproject', 0]
+    )[0];
+  }
+  return 'wing_myproject';
+}
+
+const _SLUG_STOP = new Set([
+  'the','a','an','is','are','was','were','be','been','being','have','has',
+  'had','do','does','did','will','would','could','should','it','its',
+  'i','we','you','he','she','they','me','him','her','us','them','my',
+  'this','that','these','those','and','but','or','not','in','on','at',
+  'to','of','for','with','as','by','from','into','about','so','if',
+  'just','also','then','when','what','which','how','why','get','got',
+  'use','used','using','make','made','can','now','let','very','really',
+]);
+
+function _guideSlugify(text, maxWords = 4) {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !_SLUG_STOP.has(w));
+  const freq = {};
+  for (const w of words) freq[w] = (freq[w] || 0) + 1;
+  const ranked = new Set(
+    Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, maxWords).map(([w]) => w)
+  );
+  const ordered = [];
+  for (const w of words) {
+    if (ranked.has(w) && !ordered.includes(w)) {
+      ordered.push(w);
+      if (ordered.length === maxWords) break;
+    }
+  }
+  return ordered.join('-') || 'general';
+}
+
+function _guideImportance(content, context) {
+  const combined = `${content}\n${context || ''}`;
+  let score = 2.0;
+  for (const [tier, patterns] of Object.entries(IMPORTANCE_SIGNALS)) {
+    const { count } = _guideScorePatterns(combined, patterns);
+    if (tier === 'high')        score += Math.min(count * 1.0, 2.0);
+    if (tier === 'medium_high') score += Math.min(count * 0.5, 1.0);
+    if (tier === 'medium_low')  score -= Math.min(count * 0.25, 0.5);
+    if (tier === 'low')         score -= Math.min(count * 0.5, 1.0);
+  }
+  if (combined.length > 800) score += 0.5;
+  if (combined.length < 80)  score -= 0.5;
+  return Math.min(5, Math.max(1, Math.round(score)));
+}
+
+function _readYamlRooms(yamlPath) {
+  try {
+    if (!fs.existsSync(yamlPath)) return null;
+    const raw = fs.readFileSync(yamlPath, 'utf-8');
+    const parsed = yaml.load(raw);
+    if (!parsed || !parsed.rooms) return null;
+    return parsed.rooms.map(r => ({ name: r.name || '', keywords: r.keywords || [r.name] }));
+  } catch {
+    return null;
+  }
+}
+
+function _guideAaakHint(wing, room, content, importance) {
+  const wingTag = wing.replace('wing_', '').toUpperCase().slice(0, 5);
+  const snippet = content.trim().replace(/\s+/g, ' ').slice(0, 55);
+  const stars = '★'.repeat(importance);
+  return `${wingTag}: ${room} → ${snippet}${snippet.length === 55 ? '…' : ''} ${stars}`;
 }
 
 // ── Read Tool Handlers ──────────────────────────────────────────────────────
@@ -458,6 +715,110 @@ async function toolDiaryRead({ agent_name = 'agent', last_n = 10 }) {
   }
 }
 
+// ── Guide Tool Handler ────────────────────────────────────────────────────────
+
+async function toolGuide({ content, context, hint_wing } = {}) {
+  if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    return { error: 'content is required and must be a non-empty string' };
+  }
+
+  // Strategy 1: content-type classifier
+  const s1 = _guideStrategy1(content, context);
+
+  // Strategy 2: existing taxonomy awareness
+  let s2Room = null;
+  let s2Wing = null;
+  let s2Reasoning = 'taxonomy query failed';
+
+  try {
+    const store = await getStore();
+    const allMeta = await store.get({ limit: 10000 });
+    const taxonomy = {};
+    for (const m of allMeta.metadatas) {
+      const w = m.wing || 'unknown';
+      const r = m.room || 'unknown';
+      if (!taxonomy[w]) taxonomy[w] = new Set();
+      taxonomy[w].add(r);
+    }
+    const candidateSlug = _guideSlugify(`${content}\n${context || ''}`);
+    let bestMatch = null;
+    let bestMatchWing = null;
+    for (const [w, rooms] of Object.entries(taxonomy)) {
+      for (const r of rooms) {
+        if (candidateSlug === r || content.toLowerCase().includes(r.replace(/-/g, ' '))) {
+          bestMatch = r;
+          bestMatchWing = w;
+          break;
+        }
+      }
+      if (bestMatch) break;
+    }
+    if (!bestMatch) {
+      const slugTokens = new Set(candidateSlug.split('-'));
+      let highestOverlap = 0;
+      for (const [w, rooms] of Object.entries(taxonomy)) {
+        for (const r of rooms) {
+          const overlap = r.split('-').filter(t => slugTokens.has(t)).length;
+          if (overlap > highestOverlap) {
+            highestOverlap = overlap;
+            bestMatch = r;
+            bestMatchWing = w;
+          }
+        }
+      }
+      if (highestOverlap === 0) { bestMatch = null; bestMatchWing = null; }
+    }
+    if (bestMatch) {
+      s2Room = bestMatch;
+      s2Wing = bestMatchWing;
+      s2Reasoning = `room '${bestMatch}' already exists in ${bestMatchWing}`;
+    } else {
+      s2Room = candidateSlug;
+      s2Reasoning = `no matching room found — suggested new slug '${candidateSlug}'`;
+    }
+  } catch (e) {
+    s2Reasoning = `taxonomy query error: ${e.message}`;
+    s2Room = _guideSlugify(`${content}\n${context || ''}`);
+  }
+
+  // Strategy 3: mempalace.yaml
+  const YAML_PATH = path.join(process.cwd(), 'mempalace.yaml');
+  const yamlRooms = _readYamlRooms(YAML_PATH);
+  let s3Room = null;
+  let s3Reasoning = 'mempalace.yaml not found, skipped';
+
+  if (yamlRooms) {
+    const combined = `${content}\n${context || ''}`.toLowerCase();
+    let bestScore = 0;
+    for (const r of yamlRooms) {
+      let score = 0;
+      for (const kw of r.keywords || [r.name]) {
+        if (combined.includes(kw.toLowerCase())) score++;
+      }
+      if (score > bestScore) { bestScore = score; s3Room = r.name; }
+    }
+    s3Reasoning = s3Room
+      ? `mempalace.yaml matched room '${s3Room}' (score ${bestScore})`
+      : 'mempalace.yaml present but no keyword match';
+  }
+
+  // Combine strategies
+  const finalWing = _guideSelectWing(content, context, hint_wing, s1.type) || s2Wing || 'wing_myproject';
+  const finalRoom = s3Room || s2Room || _guideSlugify(`${content}\n${context || ''}`);
+  const finalHall = s1.hall;
+  const finalImportance = _guideImportance(content, context);
+
+  return {
+    recommended: { wing: finalWing, room: finalRoom, hall: finalHall, importance: finalImportance },
+    reasoning: {
+      strategy1_content_type: s1.reasoning,
+      strategy2_taxonomy: s2Reasoning,
+      strategy3_yaml: s3Reasoning,
+    },
+    aaak_hint: _guideAaakHint(finalWing, finalRoom, content, finalImportance),
+  };
+}
+
 // ── Tool Definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -671,6 +1032,32 @@ const TOOLS = [
       required: ['agent_name'],
     },
     handler: toolDiaryRead,
+  },
+  {
+    name: 'mempalace_guide',
+    description:
+      'Analyse content and recommend wing/room/hall/importance before filing. ' +
+      'Runs three strategies: content-type classifier, existing taxonomy match, and mempalace.yaml. ' +
+      'Call this BEFORE mempalace_add_drawer when unsure where to file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: {
+          type: 'string',
+          description: 'The text to be stored — the actual content to analyse',
+        },
+        context: {
+          type: 'string',
+          description: 'What the conversation/situation is about (e.g. "debugging docker setup"). Optional but improves accuracy.',
+        },
+        hint_wing: {
+          type: 'string',
+          description: 'Optional wing hint (e.g. "wing_code" or just "code"). Overrides auto-detection if valid.',
+        },
+      },
+      required: ['content'],
+    },
+    handler: toolGuide,
   },
 ];
 
