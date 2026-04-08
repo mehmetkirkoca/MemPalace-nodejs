@@ -122,6 +122,14 @@ Local usage via stdio transport is also supported:
 node src/mcpServer.js
 ```
 
+### Connecting Claude Code (CLI)
+
+The `.mcp.json` file in this repo configures the MCP server automatically for Claude Code users. After starting the Docker stack, register the server once via:
+
+```bash
+claude mcp add --transport http mempalace http://localhost:3100/mcp
+```
+
 ## Running Benchmarks
 
 ```bash
