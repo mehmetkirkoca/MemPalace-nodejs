@@ -47,7 +47,16 @@ Or just open this repo in Claude Code — the included `.mcp.json` will prompt f
 
 ### 3. Start a conversation
 
-Claude will now remember things across sessions. On each wake-up it loads your memory palace and queries it before responding. You can also tell it explicitly:
+Claude will now remember things across sessions. **Zero configuration required** — the MCP server ships with a built-in memory protocol that activates automatically on connection:
+
+- On wake-up, Claude loads the palace overview
+- Before responding to factual questions, Claude queries memory first instead of guessing
+- When you share new information, Claude files it into the right wing/room
+- At session end, Claude can write to its own diary
+
+This works **without any CLAUDE.md, system prompt edits, or extra user instructions** — the protocol is delivered via the MCP `initialize` response and shown to the model as part of its session context.
+
+You can also tell Claude explicitly:
 
 > "Remember that we decided to use Qdrant over ChromaDB because it supports Docker natively."
 
@@ -86,7 +95,7 @@ It runs three checks: content-type detection, existing room matching, and your p
 
 ## MCP Tools
 
-20 tools available to Claude once connected:
+19 tools available to Claude once connected:
 
 | What you can do | Tools |
 |-----------------|-------|
@@ -132,7 +141,7 @@ docker compose --profile dev up
 
 ## Credits
 
-Node.js port of [MemPalace](https://github.com/milla-jovovich/mempalace), originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). All credit for the core architecture, AAAK memory dialect, and benchmark methodology belongs to the original authors.
+Node.js port of [MemPalace](https://github.com/milla-jovovich/mempalace), originally created by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). All credit for the core architecture and benchmark methodology belongs to the original authors. This port removes the experimental AAAK compression dialect since it regressed search recall (84.2% vs 96.6% in raw mode); the verbatim-first storage and knowledge graph remain unchanged.
 
 ## License
 

@@ -548,19 +548,6 @@ export class EntityRegistry {
     return newCandidates;
   }
 
-  // ── AAAK code generation ───────────────────────────────────────────────
-
-  encodeEntity(name) {
-    /**
-     * Generate a 3-letter uppercase AAAK code for a name.
-     * e.g. "Alice" → "ALC", "Bob" → "BOB"
-     *
-     * @param {string} name
-     * @returns {string}
-     */
-    return name.slice(0, 3).toUpperCase();
-  }
-
   // ── Query helpers for retrieval ────────────────────────────────────────
 
   extractPeopleFromQuery(query) {

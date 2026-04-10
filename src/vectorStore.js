@@ -71,7 +71,13 @@ export class VectorStore {
     }
   }
 
-  async add({ ids, documents, metadatas }) {
+  async add({ ids, documents, metadatas, id, content, metadata }) {
+    // Support single-item format: add({ id, content, metadata })
+    if (id && content) {
+      ids = [id];
+      documents = [content];
+      metadatas = [metadata || {}];
+    }
     const BATCH_SIZE = 500;
     const vectors = await this._embedder.embedBatch(documents);
 

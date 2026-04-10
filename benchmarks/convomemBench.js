@@ -18,7 +18,6 @@
  *     node benchmarks/convomemBench.js                                # sample 100 items
  *     node benchmarks/convomemBench.js --limit 500                    # sample 500 items
  *     node benchmarks/convomemBench.js --category user_evidence       # one category only
- *     node benchmarks/convomemBench.js --mode aaak                    # test AAAK compression
  */
 
 import fs from 'fs';
@@ -26,7 +25,6 @@ import path from 'path';
 import { parseArgs } from 'util';
 import { fileURLToPath } from 'url';
 import { VectorStore } from '../src/vectorStore.js';
-import { Dialect } from '../src/dialect.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -177,16 +175,8 @@ async function retrieveForItem(item, topK = 10, mode = 'raw') {
   try {
     await store.init();
 
-    let docs;
-    if (mode === 'aaak') {
-      const dialect = new Dialect();
-      docs = corpus.map((doc) => dialect.compress(doc));
-    } else {
-      docs = corpus;
-    }
-
     await store.add({
-      documents: docs,
+      documents: corpus,
       ids: corpus.map((_, i) => `msg_${i}`),
       metadatas: corpusSpeakers.map((s, i) => ({ speaker: s, idx: i })),
     });
@@ -341,8 +331,8 @@ const topK = parseInt(args['top-k'], 10);
 const mode = args.mode;
 const cacheDir = args['cache-dir'];
 
-if (!['raw', 'aaak'].includes(mode)) {
-  console.error(`Invalid mode: ${mode}. Must be "raw" or "aaak".`);
+if (!['raw'].includes(mode)) {
+  console.error(`Invalid mode: ${mode}. Must be "raw".`);
   process.exit(1);
 }
 

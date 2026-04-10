@@ -2,7 +2,7 @@
  * mcpServer.js — MemPalace MCP Server
  * ====================================
  *
- * 20 MCP tools for palace access.
+ * 19 MCP tools for palace access.
  *
  * Tools (read):
  *   mempalace_status          — total drawers, wing/room breakdown
@@ -11,7 +11,6 @@
  *   mempalace_get_taxonomy    — full wing → room → count tree
  *   mempalace_search          — semantic search, optional wing/room filter
  *   mempalace_check_duplicate — check if content already exists before filing
- *   mempalace_get_aaak_spec   — AAAK dialect reference
  *
  * Tools (write):
  *   mempalace_add_drawer      — file verbatim content into a wing/room
@@ -30,7 +29,7 @@
  *   mempalace_graph_stats     — connectivity
  *
  * Tools (diary):
- *   mempalace_diary_write     — AAAK diary entry
+ *   mempalace_diary_write     — write a diary entry
  *   mempalace_diary_read      — recent entries
  *
  * Tools (guide):
@@ -59,32 +58,13 @@ import { VERSION } from './version.js';
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const PALACE_PROTOCOL = `IMPORTANT — MemPalace Memory Protocol:
-1. ON WAKE-UP: Call mempalace_status to load palace overview + AAAK spec.
+1. ON WAKE-UP: Call mempalace_status to load palace overview.
 2. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
 3. IF UNSURE about a fact (name, gender, age, relationship): say "let me check" and query the palace. Wrong is worse than slow.
 4. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
 5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
 
 This protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory.`;
-
-const AAAK_SPEC = `AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
-It is designed to be readable by both humans and LLMs without decoding.
-
-FORMAT:
-  ENTITIES: 3-letter uppercase codes. ALC=Alice, JOR=Jordan, RIL=Riley, MAX=Max, BEN=Ben.
-  EMOTIONS: *action markers* before/during text. *warm*=joy, *fierce*=determined, *raw*=vulnerable, *bloom*=tenderness.
-  STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.
-  DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).
-  IMPORTANCE: ★ to ★★★★★ (1-5 scale).
-  HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.
-  WINGS: wing_user, wing_agent, wing_team, wing_code, wing_myproject, wing_hardware, wing_ue5, wing_ai_research.
-  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).
-
-EXAMPLE:
-  FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)
-
-Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.
-When WRITING AAAK: use entity codes, mark emotions, keep structure tight.`;
 
 // ── Guide Patterns (Strategy 1 — content-type classifier) ────────────────────
 
@@ -183,7 +163,7 @@ const WING_KEYWORDS = {
     /\*[^*]+\*/,
   ],
   wing_agent: [
-    /\b(agent|memory palace|mempalace|aaak|drawer|wing|room|hall|palace protocol|knowledge graph)\b/i,
+    /\b(agent|memory palace|mempalace|drawer|wing|room|hall|palace protocol|knowledge graph)\b/i,
   ],
 };
 
@@ -364,7 +344,7 @@ function _readYamlRooms(yamlPath) {
   }
 }
 
-function _guideAaakHint(wing, room, content, importance) {
+function _guidePreviewHint(wing, room, content, importance) {
   const wingTag = wing.replace('wing_', '').toUpperCase().slice(0, 5);
   const snippet = content.trim().replace(/\s+/g, ' ').slice(0, 55);
   const stars = '★'.repeat(importance);
@@ -401,7 +381,6 @@ async function toolStatus() {
     wings,
     rooms,
     protocol: PALACE_PROTOCOL,
-    aaak_dialect: AAAK_SPEC,
   };
 }
 
@@ -503,10 +482,6 @@ async function toolCheckDuplicate({ content, threshold = 0.9 }) {
   } catch (e) {
     return { error: e.message };
   }
-}
-
-function toolGetAaakSpec() {
-  return { aaak_spec: AAAK_SPEC };
 }
 
 // ── Write Tool Handlers ─────────────────────────────────────────────────────
@@ -818,7 +793,7 @@ async function toolGuide({ content, context, hint_wing } = {}) {
       strategy2_taxonomy: s2Reasoning,
       strategy3_yaml: s3Reasoning,
     },
-    aaak_hint: _guideAaakHint(finalWing, finalRoom, content, finalImportance),
+    preview_hint: _guidePreviewHint(finalWing, finalRoom, content, finalImportance),
   };
 }
 
@@ -881,12 +856,6 @@ const TOOLS = [
       required: ['content'],
     },
     handler: toolCheckDuplicate,
-  },
-  {
-    name: 'mempalace_get_aaak_spec',
-    description: 'Get the AAAK dialect specification — the compressed memory format MemPalace uses.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: toolGetAaakSpec,
   },
   {
     name: 'mempalace_add_drawer',
@@ -1011,12 +980,12 @@ const TOOLS = [
   },
   {
     name: 'mempalace_diary_write',
-    description: 'Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on.',
+    description: 'Write to your personal agent diary. Your observations, thoughts, what you worked on.',
     inputSchema: {
       type: 'object',
       properties: {
         agent_name: { type: 'string', description: 'Your name — each agent gets their own diary wing' },
-        entry: { type: 'string', description: 'Your diary entry in AAAK format' },
+        entry: { type: 'string', description: 'Your diary entry (plain text)' },
         topic: { type: 'string', description: 'Topic tag (optional, default: general)' },
       },
       required: ['agent_name', 'entry'],
@@ -1025,7 +994,7 @@ const TOOLS = [
   },
   {
     name: 'mempalace_diary_read',
-    description: 'Read your recent diary entries (in AAAK). See what past versions of yourself recorded.',
+    description: 'Read your recent diary entries. See what past versions of yourself recorded.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1072,14 +1041,17 @@ export function getToolDefinitions() {
 
 // ── Internal: expose for testing ────────────────────────────────────────────
 
-export { TOOLS, PALACE_PROTOCOL, AAAK_SPEC };
+export { TOOLS, PALACE_PROTOCOL };
 
 // ── MCP Server Setup ────────────────────────────────────────────────────────
 
 export function createServer() {
   const server = new Server(
     { name: 'mempalace', version: VERSION },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      instructions: PALACE_PROTOCOL,
+    }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

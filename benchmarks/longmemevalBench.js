@@ -17,13 +17,11 @@
  *
  * Modes:
  *   raw     - baseline: raw text into VectorStore (default)
- *   aaak    - AAAK dialect compression before ingestion
  *   rooms   - topic-based room detection + room-filtered search
  *   hybrid  - semantic + keyword overlap re-ranking
  *
  * Usage:
  *   node benchmarks/longmemevalBench.js data/longmemeval_s_cleaned.json
- *   node benchmarks/longmemevalBench.js data/longmemeval_s_cleaned.json --mode aaak
  *   node benchmarks/longmemevalBench.js data/longmemeval_s_cleaned.json --mode rooms
  *   node benchmarks/longmemevalBench.js data/longmemeval_s_cleaned.json --granularity turn
  *   node benchmarks/longmemevalBench.js data/longmemeval_s_cleaned.json --limit 20
@@ -33,7 +31,6 @@ import fs from 'fs';
 import path from 'path';
 import { VectorStore } from '../src/vectorStore.js';
 import { Embedder } from '../src/embedder.js';
-import { Dialect } from '../src/dialect.js';
 
 // =============================================================================
 // METRICS
@@ -168,89 +165,6 @@ async function buildPalaceAndRetrieve(entry, granularity = 'session', nResults =
     if (!seen.has(i)) {
       rankedIndices.push(i);
     }
-  }
-
-  await store.deleteCollection();
-  return { rankings: rankedIndices, corpus, corpusIds, corpusTimestamps };
-}
-
-// =============================================================================
-// AAAK MODE
-// =============================================================================
-
-async function buildPalaceAndRetrieveAaak(entry, granularity = 'session', nResults = 50) {
-  const dialect = new Dialect();
-
-  const corpus = [];
-  const corpusCompressed = [];
-  const corpusIds = [];
-  const corpusTimestamps = [];
-
-  const sessions = entry.haystack_sessions;
-  const sessionIds = entry.haystack_session_ids;
-  const dates = entry.haystack_dates;
-
-  for (let sessIdx = 0; sessIdx < sessions.length; sessIdx++) {
-    const session = sessions[sessIdx];
-    const sessId = sessionIds[sessIdx];
-    const date = dates[sessIdx];
-
-    if (granularity === 'session') {
-      const userTurns = session
-        .filter((t) => t.role === 'user')
-        .map((t) => t.content);
-      if (userTurns.length > 0) {
-        const doc = userTurns.join('\n');
-        const compressed = dialect.compress(doc, { date });
-        corpus.push(doc);
-        corpusCompressed.push(compressed);
-        corpusIds.push(sessId);
-        corpusTimestamps.push(date);
-      }
-    } else {
-      let turnNum = 0;
-      for (const turn of session) {
-        if (turn.role === 'user') {
-          const compressed = dialect.compress(turn.content);
-          corpus.push(turn.content);
-          corpusCompressed.push(compressed);
-          corpusIds.push(`${sessId}_turn_${turnNum}`);
-          corpusTimestamps.push(date);
-          turnNum++;
-        }
-      }
-    }
-  }
-
-  if (corpus.length === 0) {
-    return { rankings: [], corpus, corpusIds, corpusTimestamps };
-  }
-
-  const store = await freshVectorStore();
-
-  const ids = corpusCompressed.map((_, i) => `doc_${i}`);
-  const metadatas = corpusIds.map((cid, i) => ({
-    corpus_id: cid,
-    timestamp: corpusTimestamps[i],
-  }));
-
-  // Ingest compressed text
-  await store.add({ ids, documents: corpusCompressed, metadatas });
-
-  // Query with raw question
-  const query = entry.question;
-  const results = await store.query({
-    queryTexts: [query],
-    nResults: Math.min(nResults, corpus.length),
-  });
-
-  const resultIds = results.ids[0];
-  const docIdToIdx = new Map(corpus.map((_, i) => [`doc_${i}`, i]));
-  const rankedIndices = resultIds.map((rid) => docIdToIdx.get(rid));
-
-  const seen = new Set(rankedIndices);
-  for (let i = 0; i < corpus.length; i++) {
-    if (!seen.has(i)) rankedIndices.push(i);
   }
 
   await store.deleteCollection();
@@ -530,9 +444,7 @@ async function runBenchmark({
 
     let result;
     try {
-      if (mode === 'aaak') {
-        result = await buildPalaceAndRetrieveAaak(entry, granularity);
-      } else if (mode === 'rooms') {
+      if (mode === 'rooms') {
         result = await buildPalaceAndRetrieveRooms(entry, granularity);
       } else if (mode === 'hybrid') {
         result = await buildPalaceAndRetrieveHybrid(entry, granularity, 50, hybridWeight);
@@ -704,7 +616,7 @@ function parseArgs() {
 Options:
   --granularity <session|turn>  Retrieval granularity (default: session)
   --limit <N>                   Limit to N questions (0 = all)
-  --mode <mode>                 raw, aaak, rooms, hybrid (default: raw)
+  --mode <mode>                 raw, rooms, hybrid (default: raw)
   --out <file>                  Output JSONL file path
   --skip <N>                    Skip first N questions
   --hybrid-weight <float>       Keyword overlap weight for hybrid (default: 0.30)
@@ -721,7 +633,7 @@ Options:
   }
   parsed.dataFile = positional[0];
 
-  const validModes = ['raw', 'aaak', 'rooms', 'hybrid'];
+  const validModes = ['raw', 'rooms', 'hybrid'];
   if (!validModes.includes(parsed.mode)) {
     console.error(`ERROR: invalid mode '${parsed.mode}'. Valid: ${validModes.join(', ')}`);
     process.exit(1);

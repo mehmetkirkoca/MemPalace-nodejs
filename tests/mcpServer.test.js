@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getToolDefinitions, TOOLS, PALACE_PROTOCOL, AAAK_SPEC } from '../src/mcpServer.js';
+import { getToolDefinitions, TOOLS, PALACE_PROTOCOL } from '../src/mcpServer.js';
 
 const EXPECTED_TOOL_NAMES = [
   'mempalace_status',
@@ -8,7 +8,6 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_get_taxonomy',
   'mempalace_search',
   'mempalace_check_duplicate',
-  'mempalace_get_aaak_spec',
   'mempalace_add_drawer',
   'mempalace_delete_drawer',
   'mempalace_kg_query',
@@ -25,9 +24,9 @@ const EXPECTED_TOOL_NAMES = [
 ];
 
 describe('getToolDefinitions', () => {
-  it('returns 20 tool definitions', () => {
+  it('returns 19 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(19);
   });
 
   it('contains all expected tool names', () => {
@@ -111,10 +110,5 @@ describe('Constants', () => {
   it('PALACE_PROTOCOL is defined and non-empty', () => {
     expect(PALACE_PROTOCOL).toBeTruthy();
     expect(PALACE_PROTOCOL).toContain('MemPalace Memory Protocol');
-  });
-
-  it('AAAK_SPEC is defined and non-empty', () => {
-    expect(AAAK_SPEC).toBeTruthy();
-    expect(AAAK_SPEC).toContain('AAAK');
   });
 });

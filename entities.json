@@ -1,0 +1,172 @@
+{
+  "people": [],
+  "projects": [
+    {
+      "name": "Node",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 12,
+      "signals": [
+        "code file reference (12x)"
+      ]
+    },
+    {
+      "name": "Qdrant",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 11,
+      "signals": [
+        "versioned/hyphenated (2x)"
+      ]
+    },
+    {
+      "name": "Python",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 11,
+      "signals": [
+        "project verb (1x)"
+      ]
+    },
+    {
+      "name": "Gemini",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 10,
+      "signals": [
+        "versioned/hyphenated (2x)"
+      ]
+    },
+    {
+      "name": "Claude",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 9,
+      "signals": [
+        "versioned/hyphenated (1x)"
+      ]
+    },
+    {
+      "name": "Docker",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 7,
+      "signals": [
+        "project verb (1x)",
+        "versioned/hyphenated (4x)"
+      ]
+    },
+    {
+      "name": "Port",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 5,
+      "signals": [
+        "versioned/hyphenated (1x)"
+      ]
+    },
+    {
+      "name": "Commander",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 5,
+      "signals": [
+        "code file reference (6x)"
+      ]
+    },
+    {
+      "name": "Entity",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 4,
+      "signals": [
+        "versioned/hyphenated (1x)"
+      ]
+    },
+    {
+      "name": "Setup",
+      "type": "project",
+      "confidence": 0.99,
+      "frequency": 3,
+      "signals": [
+        "code file reference (3x)"
+      ]
+    }
+  ],
+  "uncertain": [
+    {
+      "name": "Create",
+      "type": "uncertain",
+      "confidence": 0.24,
+      "frequency": 12,
+      "signals": [
+        "appears 12x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Tests",
+      "type": "uncertain",
+      "confidence": 0.2,
+      "frequency": 10,
+      "signals": [
+        "appears 10x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Benchmark",
+      "type": "uncertain",
+      "confidence": 0.18,
+      "frequency": 9,
+      "signals": [
+        "appears 9x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Haiku",
+      "type": "uncertain",
+      "confidence": 0.18,
+      "frequency": 9,
+      "signals": [
+        "appears 9x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Code",
+      "type": "uncertain",
+      "confidence": 0.16,
+      "frequency": 8,
+      "signals": [
+        "appears 8x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Recall",
+      "type": "uncertain",
+      "confidence": 0.14,
+      "frequency": 7,
+      "signals": [
+        "appears 7x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Sonnet",
+      "type": "uncertain",
+      "confidence": 0.12,
+      "frequency": 6,
+      "signals": [
+        "appears 6x, no strong type signals"
+      ]
+    },
+    {
+      "name": "Wings",
+      "type": "uncertain",
+      "confidence": 0.5,
+      "frequency": 5,
+      "signals": [
+        "pronoun nearby (1x)",
+        "project verb (2x)",
+        "mixed signals — needs review"
+      ]
+    }
+  ]
+}

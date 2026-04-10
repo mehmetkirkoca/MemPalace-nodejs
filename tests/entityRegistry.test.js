@@ -1,7 +1,7 @@
 /**
  * entityRegistry.test.js — Tests for EntityRegistry module.
  *
- * Covers: seed, lookup, encodeEntity, ambiguous word disambiguation,
+ * Covers: seed, lookup, ambiguous word disambiguation,
  * extractPeopleFromQuery, learnFromText, save/load persistence.
  */
 
@@ -176,28 +176,6 @@ describe('EntityRegistry — lookup', () => {
   });
 });
 
-// ── encodeEntity ─────────────────────────────────────────────────────────────
-
-describe('EntityRegistry — encodeEntity', () => {
-  it('generates 3-letter uppercase code', () => {
-    const reg = EntityRegistry.load(tmpDir);
-    expect(reg.encodeEntity('Alice')).toBe('ALI');
-    expect(reg.encodeEntity('Bob')).toBe('BOB');
-    expect(reg.encodeEntity('Riley')).toBe('RIL');
-  });
-
-  it('handles short names', () => {
-    const reg = EntityRegistry.load(tmpDir);
-    expect(reg.encodeEntity('Jo')).toBe('JO');
-    expect(reg.encodeEntity('A')).toBe('A');
-  });
-
-  it('handles names with spaces', () => {
-    const reg = EntityRegistry.load(tmpDir);
-    // Takes first 3 chars of the name
-    expect(reg.encodeEntity('Mary Jane')).toBe('MAR');
-  });
-});
 
 // ── extractPeopleFromQuery ──────────────────────────────────────────────────
 
