@@ -21,12 +21,16 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_diary_write',
   'mempalace_diary_read',
   'mempalace_guide',
+  'mempalace_wake_up',
+  'mempalace_recall',
+  'mempalace_list_identities',
+  'mempalace_setup',
 ];
 
 describe('getToolDefinitions', () => {
-  it('returns 19 tool definitions', () => {
+  it('returns 23 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(19);
+    expect(tools).toHaveLength(23);
   });
 
   it('contains all expected tool names', () => {
@@ -103,6 +107,23 @@ describe('TOOLS internal', () => {
     expect(toolMap.mempalace_guide.inputSchema.required).toContain('content');
     expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('context');
     expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('hint_wing');
+
+    // wake_up: all optional, has context param
+    expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('wing');
+    expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('context');
+    expect(toolMap.mempalace_wake_up.inputSchema.properties).toHaveProperty('context');
+
+    // recall: all optional
+    expect(toolMap.mempalace_recall.inputSchema.required ?? []).not.toContain('wing');
+    expect(toolMap.mempalace_recall.inputSchema.required ?? []).not.toContain('room');
+
+    // list_identities: no required params
+    expect(toolMap.mempalace_list_identities.inputSchema.required ?? []).toHaveLength(0);
+
+    // setup: name required
+    expect(toolMap.mempalace_setup.inputSchema.required).toContain('name');
+    expect(toolMap.mempalace_setup.inputSchema.required).not.toContain('about');
+    expect(toolMap.mempalace_setup.inputSchema.required).not.toContain('preferences');
   });
 });
 

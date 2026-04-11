@@ -34,6 +34,10 @@
  *
  * Tools (guide):
  *   mempalace_guide           — recommend wing/room/hall/importance before filing
+ *
+ * Tools (memory stack):
+ *   mempalace_wake_up         — L0 identity + L1 essential story (call on session start)
+ *   mempalace_recall          — L2 on-demand retrieval by wing/room (no embedding)
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -46,6 +50,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import yaml from 'js-yaml';
 
@@ -58,12 +63,14 @@ import { VERSION } from './version.js';
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const PALACE_PROTOCOL = `IMPORTANT — MemPalace Memory Protocol:
-1. ON WAKE-UP: Call mempalace_status to load palace overview.
-2. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
-3. IF UNSURE about a fact (name, gender, age, relationship): say "let me check" and query the palace. Wrong is worse than slow.
-4. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
-5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
+1. ON WAKE-UP: Call mempalace_wake_up(context="<first user message or topic>") to auto-load the right agent identity (L0) and top memories (L1). Do this first, every session.
+2. WHEN A TOPIC ARISES: Call mempalace_recall(wing, room) to load that room's contents (L2) — fast, no embedding.
+3. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
+4. IF UNSURE about a fact (name, gender, age, relationship): say "let me check" and query the palace. Wrong is worse than slow.
+5. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
+6. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
 
+Memory layers: L0 (identity) + L1 (top facts, always loaded) → L2 (room on-demand) → L3 (mempalace_search, semantic).
 This protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory.`;
 
 // ── Guide Patterns (Strategy 1 — content-type classifier) ────────────────────
@@ -188,24 +195,34 @@ const IMPORTANCE_SIGNALS = {
 
 // ── Lazy singletons ──────────────────────────────────────────────────────────
 
-let _store = null;
-let _kg = null;
+const PALACE_BASE     = path.join(os.homedir(), '.mempalace');
+const DEFAULT_PALACE  = 'personality_memory_palace';
+const DEFAULT_KG_PATH = path.join(PALACE_BASE, 'knowledge_graph.sqlite3');
+
+// Active palace state — set by toolWakeUp when an identity is selected
+let _activePalace = DEFAULT_PALACE;
+let _activeKgPath = DEFAULT_KG_PATH;
+
+// Per-palace caches
+const _stores = {};
+const _kgs = {};
 
 async function getStore() {
-  if (!_store) {
-    _store = new VectorStore({
+  if (!_stores[_activePalace]) {
+    _stores[_activePalace] = new VectorStore({
       qdrantUrl: process.env.QDRANT_URL || 'http://localhost:6333',
+      collectionName: _activePalace,
     });
-    await _store.init();
+    await _stores[_activePalace].init();
   }
-  return _store;
+  return _stores[_activePalace];
 }
 
 function getKg() {
-  if (!_kg) {
-    _kg = new KnowledgeGraph();
+  if (!_kgs[_activeKgPath]) {
+    _kgs[_activeKgPath] = new KnowledgeGraph(_activeKgPath);
   }
-  return _kg;
+  return _kgs[_activeKgPath];
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────
@@ -486,7 +503,7 @@ async function toolCheckDuplicate({ content, threshold = 0.9 }) {
 
 // ── Write Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolAddDrawer({ wing, room, content, source_file, added_by = 'mcp' }) {
+async function toolAddDrawer({ wing, room, content, hall, importance = 3, source_file, added_by = 'mcp' }) {
   const store = await getStore();
 
   // Duplicate check
@@ -514,6 +531,8 @@ async function toolAddDrawer({ wing, room, content, source_file, added_by = 'mcp
         {
           wing,
           room,
+          hall: hall || 'hall_facts',
+          importance,
           source_file: source_file || '',
           chunk_index: 0,
           added_by,
@@ -797,6 +816,347 @@ async function toolGuide({ content, context, hint_wing } = {}) {
   };
 }
 
+// ── Memory Stack Tool Handlers ────────────────────────────────────────────────
+
+const IDENTITY_PATH  = process.env.PALACE_IDENTITY_PATH || '/root/.mempalace/identity.txt';
+const IDENTITY_DIR   = process.env.PALACE_IDENTITY_DIR  || '/root/.mempalace/identities';
+const L1_MAX_DRAWERS = 15;
+const L1_MAX_CHARS   = 3200;
+
+// ── Identity Helpers ──────────────────────────────────────────────────────────
+
+function _parseIdentityFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const FENCE = /^---\s*$/m;
+  const parts = raw.split(FENCE);
+
+  let meta = { name: null, description: null, keywords: [], wing_focus: null, palace: null };
+  let body = raw.trim();
+
+  // Expect: ['', frontmatter, body] when file starts with ---
+  if (parts.length >= 3 && raw.trimStart().startsWith('---')) {
+    try {
+      const parsed = yaml.load(parts[1]) || {};
+      meta.name        = parsed.name        || null;
+      meta.description = parsed.description || null;
+      meta.keywords    = Array.isArray(parsed.keywords) ? parsed.keywords.map(String) : [];
+      meta.wing_focus  = parsed.wing_focus  || null;
+      meta.palace      = parsed.palace      || null;
+      body = parts.slice(2).join('---').trim();
+    } catch {
+      // malformed frontmatter — treat whole file as body
+    }
+  }
+
+  if (!meta.name) {
+    meta.name = path.basename(filePath, '.txt');
+  }
+
+  return { ...meta, body, file: filePath };
+}
+
+function _loadIdentities() {
+  // Prefer identities/ directory
+  if (fs.existsSync(IDENTITY_DIR)) {
+    try {
+      const files = fs.readdirSync(IDENTITY_DIR).filter(f => f.endsWith('.txt')).sort();
+      return files.map(f => _parseIdentityFile(path.join(IDENTITY_DIR, f)));
+    } catch {
+      // fall through to single-file fallback
+    }
+  }
+  // Backward compat: single identity.txt
+  if (fs.existsSync(IDENTITY_PATH)) {
+    return [_parseIdentityFile(IDENTITY_PATH)];
+  }
+  return [];
+}
+
+function _selectIdentity(context, identities) {
+  if (!identities || identities.length === 0) return null;
+  if (identities.length === 1) {
+    return { identity: identities[0], score: 0, matched_keywords: [] };
+  }
+
+  const defaultId = identities.find(i => i.name === 'default');
+
+  if (!context || !context.trim()) {
+    return { identity: defaultId || identities[0], score: 0, matched_keywords: [] };
+  }
+
+  const ctx = context.toLowerCase();
+  let best = null;
+  let bestScore = -1;
+  let bestMatched = [];
+
+  for (const id of identities) {
+    const matched = id.keywords.filter(kw => ctx.includes(kw.toLowerCase()));
+    const score = matched.length;
+    if (score > bestScore || (score === bestScore && id.name === 'default')) {
+      best = id;
+      bestScore = score;
+      bestMatched = matched;
+    }
+  }
+
+  // If no keyword matched at all, fall back to default
+  if (bestScore === 0 && defaultId) {
+    return { identity: defaultId, score: 0, matched_keywords: [] };
+  }
+
+  return { identity: best, score: bestScore, matched_keywords: bestMatched };
+}
+
+async function toolWakeUp({ wing, context } = {}) {
+  // L0 — auto-select identity
+  let l0 = '';
+  let identitySelected = null;
+
+  try {
+    const identities = _loadIdentities();
+    const result = _selectIdentity(context, identities);
+
+    if (result) {
+      const id = result.identity;
+      l0 = id.body || `## L0 — IDENTITY\n(${id.name} — no body content)`;
+
+      // Activate the identity's palace
+      _activePalace = id.palace || DEFAULT_PALACE;
+      _activeKgPath = id.palace
+        ? path.join(PALACE_BASE, `kg_${id.palace}.sqlite3`)
+        : DEFAULT_KG_PATH;
+
+      identitySelected = {
+        name: id.name,
+        description: id.description || null,
+        wing_focus: id.wing_focus || null,
+        palace: _activePalace,
+        reason: result.score > 0
+          ? `keyword match (${result.matched_keywords.join(', ')})`
+          : 'default fallback',
+      };
+    } else {
+      l0 = `## L0 — IDENTITY\nNo identity configured. Create ${IDENTITY_DIR}/default.txt to get started.`;
+    }
+  } catch (e) {
+    l0 = `## L0 — IDENTITY\nCould not load identities: ${e.message}`;
+  }
+
+  // Determine L1 wing filter: explicit param > identity's wing_focus > none
+  const l1Wing = wing || (identitySelected && identitySelected.wing_focus) || null;
+
+  // L1 — essential story: top drawers by importance
+  let l1 = '';
+  try {
+    const store = await getStore();
+    const opts = { limit: 10000 };
+    if (l1Wing) opts.where = { wing: l1Wing };
+    const all = await store.get(opts);
+
+    if (!all.ids || all.ids.length === 0) {
+      l1 = '## L1 — ESSENTIAL STORY\nNo memories yet. Start filing with mempalace_add_drawer.';
+    } else {
+      // Score by importance field
+      const scored = [];
+      for (let i = 0; i < all.documents.length; i++) {
+        const doc = all.documents[i];
+        const meta = all.metadatas[i];
+        const imp = parseFloat(meta.importance ?? meta.emotional_weight ?? meta.weight ?? 3);
+        scored.push({ imp: isNaN(imp) ? 3 : imp, meta, doc });
+      }
+      scored.sort((a, b) => b.imp - a.imp);
+      const top = scored.slice(0, L1_MAX_DRAWERS);
+
+      // Group by room
+      const byRoom = {};
+      for (const { imp, meta, doc } of top) {
+        const room = meta.room || 'general';
+        if (!byRoom[room]) byRoom[room] = [];
+        byRoom[room].push({ imp, meta, doc });
+      }
+
+      const lines = ['## L1 — ESSENTIAL STORY'];
+      let totalLen = 0;
+      for (const [room, entries] of Object.entries(byRoom).sort()) {
+        const roomLine = `\n[${room}]`;
+        lines.push(roomLine);
+        totalLen += roomLine.length;
+        for (const { meta, doc } of entries) {
+          const src = meta.source_file ? ` (${path.basename(meta.source_file)})` : '';
+          const snippet = doc.trim().replace(/\s+/g, ' ');
+          const truncated = snippet.length > 200 ? snippet.slice(0, 197) + '...' : snippet;
+          const line = `  - ${truncated}${src}`;
+          if (totalLen + line.length > L1_MAX_CHARS) {
+            lines.push('  ... (more available via mempalace_search)');
+            break;
+          }
+          lines.push(line);
+          totalLen += line.length;
+        }
+      }
+      l1 = lines.join('\n');
+    }
+  } catch (e) {
+    l1 = `## L1 — ESSENTIAL STORY\nCould not load memories: ${e.message}`;
+  }
+
+  return {
+    identity_selected: identitySelected,
+    l0_identity: l0,
+    l1_essential: l1,
+    note: 'L2: use mempalace_recall(wing, room) for on-demand room loading. L3: use mempalace_search for semantic queries.',
+  };
+}
+
+async function toolRecall({ wing, room, limit = 10 } = {}) {
+  const store = await getStore();
+
+  let where;
+  if (wing && room) where = { $and: [{ wing }, { room }] };
+  else if (wing)    where = { wing };
+  else if (room)    where = { room };
+
+  try {
+    const results = await store.get({ where, limit });
+    const docs = results.documents || [];
+    const metas = results.metadatas || [];
+
+    if (docs.length === 0) {
+      const label = [wing, room].filter(Boolean).join('/') || 'palace';
+      return { label, entries: [], message: `No drawers found for ${label}.` };
+    }
+
+    const entries = docs.map((doc, i) => {
+      const meta = metas[i] || {};
+      const snippet = doc.trim().replace(/\s+/g, ' ');
+      return {
+        room: meta.room || '?',
+        wing: meta.wing || '?',
+        hall: meta.hall || '?',
+        importance: meta.importance ?? 3,
+        filed_at: meta.filed_at || '',
+        content: snippet.length > 300 ? snippet.slice(0, 297) + '...' : snippet,
+      };
+    });
+
+    return {
+      wing: wing || 'any',
+      room: room || 'any',
+      entries,
+      total: entries.length,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+function toolListIdentities() {
+  const identities = _loadIdentities();
+  if (identities.length === 0) {
+    return {
+      identities: [],
+      hint: `No identities found. Create .txt files in ${IDENTITY_DIR}/ with optional YAML frontmatter (name, description, keywords, wing_focus).`,
+    };
+  }
+  return {
+    identities: identities.map(({ name, description, keywords, wing_focus, palace, file }) => ({
+      name,
+      description: description || null,
+      keywords,
+      wing_focus: wing_focus || null,
+      palace: palace || DEFAULT_PALACE,
+      file,
+    })),
+    total: identities.length,
+  };
+}
+
+async function toolSetup({ name, about, preferences = [], rules = [], language = 'English' } = {}) {
+  if (!name || !name.trim()) {
+    return { error: 'name is required' };
+  }
+
+  // Force re-init: delete cached store so init() runs fresh (handles DB wipe recovery)
+  delete _stores[DEFAULT_PALACE];
+  _activePalace = DEFAULT_PALACE;
+  _activeKgPath = DEFAULT_KG_PATH;
+
+  const store = await getStore(); // creates collection if missing
+  const results = [];
+
+  // Helper: add a drawer to personality_memory_palace
+  async function addProfileDrawer(content, hall, room, importance) {
+    const hash = crypto.createHash('md5')
+      .update(content.slice(0, 80) + room)
+      .digest('hex').slice(0, 12);
+    const id = `setup_${room}_${hash}`;
+    await store.add({
+      ids: [id],
+      documents: [content],
+      metadatas: [{ wing: 'wing_user', room, hall, importance, added_by: 'setup', filed_at: new Date().toISOString() }],
+    });
+    results.push({ room, hall, importance });
+  }
+
+  // 1. User profile (about)
+  if (about && about.trim()) {
+    await addProfileDrawer(
+      `User: ${name}\n${about.trim()}`,
+      'hall_facts', 'identity', 5
+    );
+  } else {
+    await addProfileDrawer(`User: ${name}`, 'hall_facts', 'identity', 5);
+  }
+
+  // 2. Preferences (how to communicate)
+  if (preferences.length > 0) {
+    const prefText = `Communication preferences for ${name}:\n${preferences.map(p => `- ${p}`).join('\n')}`;
+    await addProfileDrawer(prefText, 'hall_preferences', 'communication-style', 5);
+  }
+
+  // 3. Rules (hard constraints)
+  if (rules.length > 0) {
+    const rulesText = `Rules the AI must always follow for ${name}:\n${rules.map(r => `- ${r}`).join('\n')}`;
+    await addProfileDrawer(rulesText, 'hall_advice', 'ai-rules', 5);
+  }
+
+  // 4. Create / overwrite default identity file
+  const identityBody = [
+    `## L0 — IDENTITY`,
+    `Name: ${name}`,
+    language !== 'English' ? `Language: ${language}` : null,
+    about ? `About: ${about.trim()}` : null,
+    preferences.length > 0 ? `\nPreferences:\n${preferences.map(p => `- ${p}`).join('\n')}` : null,
+    rules.length > 0 ? `\nRules:\n${rules.map(r => `- ${r}`).join('\n')}` : null,
+  ].filter(Boolean).join('\n');
+
+  const frontmatter = yaml.dump({
+    name: 'default',
+    description: `${name}'s personal assistant`,
+    keywords: [],
+    palace: DEFAULT_PALACE,
+  }).trim();
+
+  const identityContent = `---\n${frontmatter}\n---\n${identityBody}`;
+
+  try {
+    if (!fs.existsSync(IDENTITY_DIR)) {
+      fs.mkdirSync(IDENTITY_DIR, { recursive: true });
+    }
+    fs.writeFileSync(path.join(IDENTITY_DIR, 'default.txt'), identityContent, 'utf-8');
+  } catch (e) {
+    return { error: `Could not write identity file: ${e.message}`, drawers_created: results };
+  }
+
+  return {
+    success: true,
+    palace: DEFAULT_PALACE,
+    identity_file: path.join(IDENTITY_DIR, 'default.txt'),
+    drawers_created: results,
+    message: `Setup complete. ${name}'s personality is stored in '${DEFAULT_PALACE}'. This palace loads automatically when no specific identity matches your conversation.`,
+  };
+}
+
 // ── Tool Definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -866,6 +1226,8 @@ const TOOLS = [
         wing: { type: 'string', description: 'Wing (project name)' },
         room: { type: 'string', description: 'Room (aspect: backend, decisions, meetings...)' },
         content: { type: 'string', description: 'Verbatim content to store — exact words, never summarized' },
+        hall: { type: 'string', description: 'Memory type: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice (default: hall_facts)' },
+        importance: { type: 'integer', description: 'Importance score 1-5 (default: 3). Used by L1 wake-up to surface critical memories.' },
         source_file: { type: 'string', description: 'Where this came from (optional)' },
         added_by: { type: 'string', description: 'Who is filing this (default: mcp)' },
       },
@@ -1030,6 +1392,68 @@ const TOOLS = [
       required: ['content'],
     },
     handler: toolGuide,
+  },
+  {
+    name: 'mempalace_wake_up',
+    description:
+      'Load L0 identity + L1 essential story. Call this at the start of every session to restore context. ' +
+      'Pass context (first user message or topic) to auto-select the right agent identity. ' +
+      'L1 returns the top 15 highest-importance drawers grouped by room (max 3200 chars), ' +
+      'filtered by the selected identity\'s wing_focus unless wing is explicitly provided.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        context: { type: 'string', description: 'First user message or topic — used to auto-select agent identity (optional)' },
+        wing: { type: 'string', description: 'Override L1 wing filter — ignores identity wing_focus (optional)' },
+      },
+    },
+    handler: toolWakeUp,
+  },
+  {
+    name: 'mempalace_recall',
+    description:
+      'L2 on-demand retrieval — fetch drawers from a specific wing/room without semantic search. ' +
+      'Faster than mempalace_search. Use when a topic arises and you want all memories for that room.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        wing: { type: 'string', description: 'Wing to filter by (optional)' },
+        room: { type: 'string', description: 'Room to filter by (optional)' },
+        limit: { type: 'integer', description: 'Max entries to return (default: 10)' },
+      },
+    },
+    handler: toolRecall,
+  },
+  {
+    name: 'mempalace_list_identities',
+    description:
+      'List all available agent identities from the identities/ directory. ' +
+      'Shows name, description, keywords, and wing_focus for each. ' +
+      'Use this to see which identities are available before calling mempalace_wake_up.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    handler: toolListIdentities,
+  },
+  {
+    name: 'mempalace_setup',
+    description:
+      'First-time setup wizard. Stores user name, about, preferences, and hard rules into ' +
+      'personality_memory_palace — the fallback palace used when no specific identity matches. ' +
+      'Also creates/overwrites the default identity file. Run once to personalise the palace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string',  description: 'User\'s name (required)' },
+        about:       { type: 'string',  description: 'Who the user is — role, context, background (optional)' },
+        preferences: { type: 'array',  items: { type: 'string' }, description: 'Communication preferences, e.g. ["respond in Turkish", "be concise"] (optional)' },
+        rules:       { type: 'array',  items: { type: 'string' }, description: 'Hard rules the AI must always follow, e.g. ["never commit without testing"] (optional)' },
+        language:    { type: 'string',  description: 'Preferred response language (default: English)' },
+      },
+      required: ['name'],
+    },
+    handler: toolSetup,
   },
 ];
 

@@ -15,15 +15,24 @@ Most AI assistants forget everything the moment a conversation ends. MemPalace f
 - **Logs milestones** — "the auth bug was finally fixed on 2026-04-03"
 - **Connects facts** — knowledge graph links people, projects, and events
 
-### Benchmark Results
+### Benchmark Results (Node.js Port — Qdrant + all-MiniLM-L6-v2)
 
-| Benchmark | Recall@10 | Questions |
-|-----------|-----------|-----------|
-| **LongMemEval** (Microsoft) | **98.4%** | 500 |
-| **LoCoMo** (Snap Research) | **100%** | 1,986 |
-| **ConvoMem** (Salesforce) | **92.0%** | 500 |
+| Benchmark | R@5 | R@10 | NDCG@10 | Questions |
+|-----------|-----|------|---------|-----------|
+| **LongMemEval** (Microsoft) | **96.0%** | **98.4%** | **89.1%** | 500 |
 
-Highest published recall score for a fully local AI memory system.
+Per question-type breakdown (R@10):
+
+| Type | Recall@10 |
+|------|-----------|
+| knowledge-update | 100% |
+| multi-session | 100% |
+| temporal-reasoning | 98.5% |
+| single-session-preference | 96.7% |
+| single-session-assistant | 96.4% |
+| single-session-user | 95.7% |
+
+Verified 2026-04-11. No API key. Fully local. No GPU required.
 
 ---
 
@@ -95,10 +104,12 @@ It runs three checks: content-type detection, existing room matching, and your p
 
 ## MCP Tools
 
-19 tools available to Claude once connected:
+23 tools available to Claude once connected:
 
 | What you can do | Tools |
 |-----------------|-------|
+| **Session start** | `mempalace_wake_up`, `mempalace_recall` |
+| **Setup & identity** | `mempalace_setup`, `mempalace_list_identities` |
 | Search memories | `mempalace_search`, `mempalace_status` |
 | Store & remove | `mempalace_add_drawer`, `mempalace_delete_drawer` |
 | Smart filing | `mempalace_guide`, `mempalace_check_duplicate` |
@@ -106,6 +117,34 @@ It runs three checks: content-type detection, existing room matching, and your p
 | Browse structure | `mempalace_list_wings`, `mempalace_list_rooms`, `mempalace_get_taxonomy` |
 | Agent diary | `mempalace_diary_write`, `mempalace_diary_read` |
 | Navigation | `mempalace_traverse`, `mempalace_find_tunnels` |
+
+### Memory Layers (L0–L3)
+
+MemPalace implements a layered memory architecture that loads context efficiently without filling the context window:
+
+| Layer | Tool | What it loads | When |
+|-------|------|---------------|------|
+| **L0** Identity | `mempalace_wake_up` | Who you are, your rules & preferences | Every session start |
+| **L1** Essential | `mempalace_wake_up` | Top 15 highest-importance memories | Every session start |
+| **L2** On-demand | `mempalace_recall` | All drawers in a specific room | When a topic comes up |
+| **L3** Semantic | `mempalace_search` | Nearest matches by meaning | When searching |
+
+### Multi-Identity / Agent Modes
+
+Each identity can have its own memory palace (Qdrant collection):
+
+```
+identities/
+├── default.txt    ← personality_memory_palace (fallback)
+├── code.txt       ← code_drawers (auto-selected for dev topics)
+└── research.txt   ← research_drawers (auto-selected for AI topics)
+```
+
+Claude auto-selects the right identity from the conversation context. Run once to set up your personality palace:
+
+```
+mempalace_setup({ name: "...", preferences: [...], rules: [...] })
+```
 
 ---
 

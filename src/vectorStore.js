@@ -49,7 +49,7 @@ function convertFilter(where) {
 
 export class VectorStore {
   constructor({
-    qdrantUrl = 'http://localhost:6333',
+    qdrantUrl = process.env.QDRANT_URL || 'http://localhost:6333',
     collectionName = 'mempalace_drawers',
   } = {}) {
     this._qdrantUrl = qdrantUrl;
