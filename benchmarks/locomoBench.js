@@ -1,34 +1,47 @@
 #!/usr/bin/env node
 /**
- * MemPal × LoCoMo Benchmark
- * ===========================
+ * MemPalace × LoCoMo Benchmark
+ * ==============================
  *
- * LoCoMo benchmark üzerinde MemPal retrieval performansını ölçer.
- * 10 konuşma, 5 kategori, ~200 QA çifti.
+ * Measures MemPalace retrieval on the LoCoMo benchmark.
+ * 10 conversations, 5 categories, ~200 QA pairs.
  *
- * Her konuşma için:
- * 1. Session'ları corpus'a dönüştür
- * 2. VectorStore'a yükle
- * 3. Her QA çifti için sorgu yap
- * 4. Retrieval recall hesapla
+ * Modes:
+ *   raw     - flat VectorStore + cosine search (baseline)
+ *   hybrid  - semantic + keyword/name/quoted-phrase re-rank
+ *   rooms   - two-stage: keyword-select rooms, then hybrid within rooms
+ *   palace  - LLM-assigned rooms + hybrid re-rank (requires API key)
+ *   system  - full MemPalace pipeline: pipelineSave + room-filtered pipelineSearch
  *
- * Kullanım:
+ * Flags:
+ *   --multi-palace   (system mode only) split into personal/general palaces
+ *
+ * Usage:
  *   node benchmarks/locomoBench.js /path/to/locomo10.json
  *   node benchmarks/locomoBench.js /path/to/locomo10.json --top-k 10
- *   node benchmarks/locomoBench.js /path/to/locomo10.json --mode hybrid
- *   node benchmarks/locomoBench.js /path/to/locomo10.json --granularity session
+ *   node benchmarks/locomoBench.js /path/to/locomo10.json --mode system
+ *   node benchmarks/locomoBench.js /path/to/locomo10.json --mode system --multi-palace
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { basename, join, dirname } from 'path';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { VectorStore } from '../src/vectorStore.js';
+import { Embedder } from '../src/embedder.js';
+import {
+  slugifyRoom,
+  selectPalace,
+  selectHall,
+  getHallVectors,
+  scoreImportance,
+} from '../src/mempalacePipeline.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ─── Kategori tanımları ───────────────────────────────────────────────────────
+// ─── Category labels ──────────────────────────────────────────────────────────
 
 const CATEGORIES = {
   1: 'Single-hop',
@@ -38,7 +51,7 @@ const CATEGORIES = {
   5: 'Adversarial',
 };
 
-// ─── Metriler (LoCoMo evaluation.py'den) ──────────────────────────────────────
+// ─── Metrics (adapted from LoCoMo evaluation.py) ──────────────────────────────
 
 const PUNCTUATION = new Set(
   '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'.split('')
@@ -84,7 +97,7 @@ function _counter(arr) {
   return map;
 }
 
-// ─── Veri yükleme ─────────────────────────────────────────────────────────────
+// ─── Data loading ─────────────────────────────────────────────────────────────
 
 function loadConversationSessions(conversation, sessionSummaries = null) {
   const sessions = [];
@@ -144,7 +157,7 @@ function buildCorpusFromSessions(sessions, granularity = 'dialog') {
   return { corpus, corpusIds, corpusTimestamps };
 }
 
-// ─── Hybrid Scoring ───────────────────────────────────────────────────────────
+// ─── Hybrid scoring helpers ───────────────────────────────────────────────────
 
 const STOP_WORDS = new Set([
   'what', 'when', 'where', 'who', 'how', 'which', 'did', 'do',
@@ -212,7 +225,7 @@ function _nameBoost(names, docText) {
   return Math.min(hits / names.length, 1.0);
 }
 
-// ─── Palace Rooms ─────────────────────────────────────────────────────────────
+// ─── Palace rooms (for LLM-mode) ─────────────────────────────────────────────
 
 const PALACE_ROOMS = [
   'identity_sexuality',
@@ -233,7 +246,7 @@ const PALACE_ROOMS = [
 
 const _PALACE_ROOM_LIST = PALACE_ROOMS.map((r) => `  - ${r}`).join('\n');
 
-// ─── LLM Çağrıları ───────────────────────────────────────────────────────────
+// ─── LLM helpers (palace mode) ───────────────────────────────────────────────
 
 async function _llmCall(prompt, apiKey, model = 'claude-haiku-4-5-20251001', maxTokens = 32) {
   const payload = JSON.stringify({
@@ -301,7 +314,7 @@ async function palaceAssignRooms(sessions, sampleId, apiKey, cache, model = 'cla
   return assignments;
 }
 
-// ─── LLM Rerank ──────────────────────────────────────────────────────────────
+// ─── LLM re-rank ─────────────────────────────────────────────────────────────
 
 async function llmRerankLocomo(question, retrievedIds, retrievedDocs, apiKey, topK = 10, model = 'claude-sonnet-4-6') {
   const candidates = retrievedIds.slice(0, topK);
@@ -343,13 +356,11 @@ async function llmRerankLocomo(question, retrievedIds, retrievedDocs, apiKey, to
   return retrievedIds;
 }
 
-// ─── API Key yükleme ─────────────────────────────────────────────────────────
+// ─── API key helper ──────────────────────────────────────────────────────────
 
 function _loadApiKey(keyArg) {
   if (keyArg) return keyArg;
-  const envKey = process.env.ANTHROPIC_API_KEY || '';
-  if (envKey) return envKey;
-  return '';
+  return process.env.ANTHROPIC_API_KEY || '';
 }
 
 // ─── Retrieval helpers ────────────────────────────────────────────────────────
@@ -376,7 +387,7 @@ function evidenceToSessionIds(evidence) {
   return sessions;
 }
 
-// ─── Hybrid rerank helper (ortak skor hesabı) ────────────────────────────────
+// ─── Hybrid rerank helper ─────────────────────────────────────────────────────
 
 function hybridRerank(rawIds, rawDistances, rawDocs, predicateKws, quoted, names, topK) {
   const scored = [];
@@ -400,7 +411,121 @@ function hybridRerank(rawIds, rawDistances, rawDocs, predicateKws, quoted, names
   return scored.slice(0, topK);
 }
 
-// ─── Ana Benchmark Döngüsü ───────────────────────────────────────────────────
+// ─── System mode: shared embedder ────────────────────────────────────────────
+
+const _embedder = new Embedder();
+
+async function freshVectorStore(name) {
+  const store = new VectorStore({ collectionName: name });
+  await store.deleteCollection();
+  await store.init();
+  return store;
+}
+
+// ─── System mode: ingest + search for one conversation ───────────────────────
+
+async function systemIngestAndSearch(sessions, questions, granularity, topK, multiPalace) {
+  const { corpus, corpusIds } = buildCorpusFromSessions(sessions, granularity);
+
+  if (corpus.length === 0) {
+    return questions.map(() => ({ retrievedIds: [], roomFilterUsed: false, palaceName: 'none' }));
+  }
+
+  // Set up palaces
+  let palaces, stores;
+  if (multiPalace) {
+    const personalVec = await _embedder.embed(
+      'personal life family health emotions relationships hobbies feelings diary weekend home'
+    );
+    const generalVec = await _embedder.embed(
+      'work technical decisions projects knowledge research facts architecture code'
+    );
+    palaces = [
+      { name: 'sys_personal', scope_vector: personalVec, is_default: false },
+      { name: 'sys_general',  scope_vector: generalVec,  is_default: true  },
+    ];
+    stores = {
+      sys_personal: await freshVectorStore(`sys_personal_${Date.now()}`),
+      sys_general:  await freshVectorStore(`sys_general_${Date.now()}`),
+    };
+  } else {
+    palaces = [{ name: 'sys_single', scope_vector: null, is_default: true }];
+    stores = { sys_single: await freshVectorStore(`sys_single_${Date.now()}`) };
+  }
+
+  // Ingest: embed once per item, reuse vector for palace + hall + Qdrant
+  const hallVectors = await getHallVectors();
+  const docTextToCorpusId = new Map();
+  for (let i = 0; i < corpus.length; i++) {
+    const vec = await _embedder.embed(corpus[i]);
+    const { name: palaceName } = selectPalace(vec, palaces);
+    const hall = selectHall(vec, hallVectors);
+    const room = slugifyRoom(corpus[i] + '\n' + corpusIds[i]);
+    const importance = scoreImportance(corpus[i], corpusIds[i]);
+    const hash = createHash('md5')
+      .update(corpus[i].slice(0, 100) + i.toString())
+      .digest('hex')
+      .slice(0, 12);
+    const drawerId = `drawer_${room}_${hash}`;
+
+    await stores[palaceName].addWithVectors({
+      ids: [drawerId],
+      documents: [corpus[i]],
+      vectors: [vec],
+      metadatas: [{ room, hall, palace: palaceName, importance, corpus_id: corpusIds[i], added_by: 'benchmark' }],
+    });
+    if (!docTextToCorpusId.has(corpus[i])) {
+      docTextToCorpusId.set(corpus[i], corpusIds[i]);
+    }
+  }
+
+  // Search each question: embed once, reuse for palace selection + Qdrant query
+  const results = [];
+  for (const question of questions) {
+    const qVec = await _embedder.embed(question);
+    const { name: qPalace } = selectPalace(qVec, palaces);
+    const estimatedRoom = slugifyRoom(question);
+    const nRes = Math.min(topK * 2, corpus.length);
+
+    // Room-filtered search first, fall back to unfiltered
+    let rawResults = null;
+    let roomFilterUsed = false;
+    if (estimatedRoom && estimatedRoom !== 'general') {
+      const filtered = await stores[qPalace].queryWithVector({
+        queryVector: qVec,
+        nResults: nRes,
+        where: { room: estimatedRoom },
+      });
+      if (filtered.ids[0].length > 0) {
+        rawResults = filtered;
+        roomFilterUsed = true;
+      }
+    }
+    if (!rawResults) {
+      rawResults = await stores[qPalace].queryWithVector({ queryVector: qVec, nResults: nRes });
+    }
+
+    const retrievedIds = (rawResults.documents[0] || [])
+      .map((doc) => docTextToCorpusId.get(doc))
+      .filter(Boolean)
+      .slice(0, topK);
+
+    results.push({
+      retrievedIds,
+      roomFilterUsed,
+      palaceName: qPalace,
+    });
+  }
+
+  // Cleanup
+  for (const store of Object.values(stores)) {
+    try { await store.deleteCollection(); } catch { /* ignore */ }
+  }
+
+  return results;
+}
+
+// ─── Main benchmark loop ─────────────────────────────────────────────────────
 
 async function runBenchmark({
   dataFile,
@@ -415,6 +540,7 @@ async function runBenchmark({
   hybridWeight = 0.30,
   palaceCacheFile = null,
   palaceModel = 'claude-haiku-4-5-20251001',
+  multiPalace = false,
 }) {
   let data = JSON.parse(readFileSync(dataFile, 'utf-8'));
 
@@ -424,7 +550,7 @@ async function runBenchmark({
   if (llmRerankEnabled || mode === 'palace') {
     apiKey = _loadApiKey(llmKey);
     if (!apiKey) {
-      console.error(`HATA: --mode ${mode} için API key gerekli (--llm-key veya ANTHROPIC_API_KEY).`);
+      console.error(`ERROR: --mode ${mode} requires an API key (--llm-key or ANTHROPIC_API_KEY).`);
       process.exit(1);
     }
   }
@@ -436,26 +562,33 @@ async function runBenchmark({
     palaceCachePath = palaceCacheFile || join(__dirname, 'palace_cache_locomo.json');
     if (existsSync(palaceCachePath)) {
       palaceCache = JSON.parse(readFileSync(palaceCachePath, 'utf-8'));
-      console.log(`  Palace cache: ${Object.keys(palaceCache).length} room ataması yüklendi`);
+      console.log(`  Palace cache: ${Object.keys(palaceCache).length} room assignments loaded`);
     }
   }
 
   const rerankLabel = llmRerankEnabled ? ` + LLM re-rank (${llmModel.split('-')[1]})` : '';
 
   console.log(`\n${'='.repeat(60)}`);
-  console.log('  MemPal × LoCoMo Benchmark');
+  console.log('  MemPalace × LoCoMo Benchmark');
   console.log(`${'='.repeat(60)}`);
-  console.log(`  Data:        ${basename(dataFile)}`);
+  console.log(`  Data:          ${basename(dataFile)}`);
   console.log(`  Conversations: ${data.length}`);
-  console.log(`  Top-k:       ${topK}`);
-  console.log(`  Mode:        ${mode}${rerankLabel}`);
-  console.log(`  Granularity: ${granularity}`);
+  console.log(`  Top-k:         ${topK}`);
+  console.log(`  Mode:          ${mode}${mode === 'system' && multiPalace ? ' (multi-palace)' : ''}${rerankLabel}`);
+  console.log(`  Granularity:   ${granularity}`);
   console.log(`${'─'.repeat(60)}\n`);
 
   const allRecall = [];
   const perCategory = {};
   const resultsLog = [];
   let totalQa = 0;
+
+  // System mode pipeline stats
+  const sysStats = {
+    roomFilterHits: 0,
+    roomFilterMisses: 0,
+    totalItems: 0,
+  };
 
   const startTime = Date.now();
 
@@ -467,17 +600,56 @@ async function runBenchmark({
 
     const sessionSummaries = sample.session_summary || {};
     const sessions = loadConversationSessions(conversation, sessionSummaries);
-    const { corpus, corpusIds, corpusTimestamps } = buildCorpusFromSessions(
-      sessions,
-      granularity
-    );
+    const { corpus, corpusIds, corpusTimestamps } = buildCorpusFromSessions(sessions, granularity);
 
-    // Palace mode: room ataması
+    if (mode === 'system') {
+      // ── System mode: batch ingest then search all questions ──────────
+      console.log(
+        `  [${convIdx + 1}/${data.length}] ${sampleId}: ` +
+        `${sessions.length} sessions, ${corpus.length} docs, ${qaPairs.length} questions`
+      );
+
+      const questions = qaPairs.map((qa) => qa.question);
+      const systemResults = await systemIngestAndSearch(
+        sessions, questions, granularity, topK, multiPalace
+      );
+      sysStats.totalItems += corpus.length;
+
+      for (let qi = 0; qi < qaPairs.length; qi++) {
+        const qa = qaPairs[qi];
+        const { retrievedIds, roomFilterUsed } = systemResults[qi];
+
+        if (roomFilterUsed) sysStats.roomFilterHits++;
+        else sysStats.roomFilterMisses++;
+
+        const evidenceSet = granularity === 'dialog'
+          ? evidenceToDialogIds(qa.evidence || [])
+          : evidenceToSessionIds(qa.evidence || []);
+
+        const recall = computeRetrievalRecall(retrievedIds, evidenceSet);
+        allRecall.push(recall);
+        const cat = qa.category;
+        if (!perCategory[cat]) perCategory[cat] = [];
+        perCategory[cat].push(recall);
+        totalQa++;
+
+        resultsLog.push({
+          sample_id: sampleId,
+          question: qa.question,
+          answer: qa.answer || qa.adversarial_answer || '',
+          category: cat,
+          evidence: qa.evidence || [],
+          retrieved_ids: retrievedIds,
+          recall,
+        });
+      }
+      continue;
+    }
+
+    // ── Non-system modes ──────────────────────────────────────────────
     let roomAssignments = {};
     if (mode === 'palace') {
-      roomAssignments = await palaceAssignRooms(
-        sessions, sampleId, apiKey, palaceCache, palaceModel
-      );
+      roomAssignments = await palaceAssignRooms(sessions, sampleId, apiKey, palaceCache, palaceModel);
       if (palaceCachePath) {
         writeFileSync(palaceCachePath, JSON.stringify(palaceCache, null, 2));
       }
@@ -487,18 +659,17 @@ async function runBenchmark({
       }
       console.log(
         `  [${convIdx + 1}/${data.length}] ${sampleId}: ` +
-        `${sessions.length} session → ${Object.keys(roomsSummary).length} room, ${qaPairs.length} soru`
+        `${sessions.length} sessions → ${Object.keys(roomsSummary).length} rooms, ${qaPairs.length} questions`
       );
       const sorted = Object.entries(roomsSummary).sort((a, b) => b[1] - a[1]);
       console.log(`    Rooms: ${JSON.stringify(Object.fromEntries(sorted))}`);
     } else {
       console.log(
         `  [${convIdx + 1}/${data.length}] ${sampleId}: ` +
-        `${sessions.length} session, ${corpus.length} doc, ${qaPairs.length} soru`
+        `${sessions.length} sessions, ${corpus.length} docs, ${qaPairs.length} questions`
       );
     }
 
-    // Her konuşma için yeni bir collection oluştur
     const collectionName = `locomo_bench_${sampleId}_${Date.now()}`;
     const store = new VectorStore({ collectionName });
 
@@ -523,7 +694,6 @@ async function runBenchmark({
         const category = qa.category;
         const evidence = qa.evidence || [];
 
-        // Hybrid/rooms/palace modları için keyword çıkarımı
         const useHybrid = ['hybrid', 'rooms', 'palace'].includes(mode);
         const names = useHybrid ? _personNames(question) : [];
         const nameWords = new Set(names.map((n) => n.toLowerCase()));
@@ -535,7 +705,6 @@ async function runBenchmark({
         let retrievedDocs;
 
         if (mode === 'palace') {
-          // ── Palace navigation ──────────────────────────────────────
           const roomSummaries = {};
           for (const sess of sessions) {
             const sessId = `session_${sess.sessionNum}`;
@@ -582,7 +751,6 @@ async function runBenchmark({
           retrievedDocs = scored.map((s) => s.doc);
 
         } else if (mode === 'rooms') {
-          // ── Two-stage palace navigation ────────────────────────────
           const nRooms = Math.max(topK, Math.floor(sessions.length / 3));
           const roomScores = sessions.map((sess) => {
             const summary = sess.summary || '';
@@ -611,7 +779,6 @@ async function runBenchmark({
           retrievedDocs = scored.map((s) => s.doc);
 
         } else {
-          // ── Standard query + optional hybrid rerank ────────────────
           const nRetrieve = Math.min(
             mode === 'hybrid' ? topK * 3 : topK,
             corpus.length
@@ -634,7 +801,7 @@ async function runBenchmark({
           }
         }
 
-        // LLM rerank
+        // Optional LLM rerank
         if (llmRerankEnabled && apiKey) {
           const rerankPool = Math.min(10, retrievedIds.length);
           retrievedIds = await llmRerankLocomo(
@@ -642,7 +809,6 @@ async function runBenchmark({
           );
         }
 
-        // Recall hesapla
         const evidenceSet = granularity === 'dialog'
           ? evidenceToDialogIds(evidence)
           : evidenceToSessionIds(evidence);
@@ -664,12 +830,9 @@ async function runBenchmark({
         });
       }
     } finally {
-      // Cleanup: collection sil
       try {
         await store._client.deleteCollection(collectionName);
-      } catch {
-        // sessiz geç
-      }
+      } catch { /* ignore */ }
     }
   }
 
@@ -677,13 +840,13 @@ async function runBenchmark({
   const avgRecall = allRecall.length ? allRecall.reduce((a, b) => a + b, 0) / allRecall.length : 0;
 
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`  SONUÇLAR — MemPal (${mode}${rerankLabel}, ${granularity}, top-${topK})`);
+  console.log(`  RESULTS — MemPalace (${mode}${rerankLabel}, ${granularity}, top-${topK})`);
   console.log(`${'='.repeat(60)}`);
-  console.log(`  Süre:        ${elapsed.toFixed(1)}s (${(elapsed / Math.max(totalQa, 1)).toFixed(2)}s/soru)`);
-  console.log(`  Soru sayısı: ${totalQa}`);
-  console.log(`  Ort. Recall: ${avgRecall.toFixed(3)}`);
+  console.log(`  Time:          ${elapsed.toFixed(1)}s (${(elapsed / Math.max(totalQa, 1)).toFixed(2)}s/question)`);
+  console.log(`  Questions:     ${totalQa}`);
+  console.log(`  Avg Recall:    ${avgRecall.toFixed(3)}`);
 
-  console.log('\n  KATEGORİ BAZLI RECALL:');
+  console.log('\n  PER-CATEGORY RECALL:');
   for (const cat of Object.keys(perCategory).sort()) {
     const vals = perCategory[cat];
     const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
@@ -694,15 +857,23 @@ async function runBenchmark({
   const perfect = allRecall.filter((r) => r >= 1.0).length;
   const partial = allRecall.filter((r) => r > 0 && r < 1.0).length;
   const zero = allRecall.filter((r) => r === 0).length;
-  console.log('\n  RECALL DAĞILIMI:');
+  console.log('\n  RECALL DISTRIBUTION:');
   console.log(`    Perfect (1.0):  ${String(perfect).padStart(4)} (${(perfect / allRecall.length * 100).toFixed(1)}%)`);
   console.log(`    Partial (0-1):  ${String(partial).padStart(4)} (${(partial / allRecall.length * 100).toFixed(1)}%)`);
   console.log(`    Zero (0.0):     ${String(zero).padStart(4)} (${(zero / allRecall.length * 100).toFixed(1)}%)`);
+
+  if (mode === 'system' && sysStats.totalItems > 0) {
+    const filterTotal = sysStats.roomFilterHits + sysStats.roomFilterMisses;
+    console.log('\n  SYSTEM PIPELINE STATS:');
+    console.log(`    Items ingested:   ${sysStats.totalItems}`);
+    console.log(`    Room filter hits: ${sysStats.roomFilterHits}/${filterTotal} (${(sysStats.roomFilterHits / filterTotal * 100).toFixed(1)}%)`);
+  }
+
   console.log(`\n${'='.repeat(60)}\n`);
 
   if (outFile) {
     writeFileSync(outFile, JSON.stringify(resultsLog, null, 2));
-    console.log(`  Sonuçlar kaydedildi: ${outFile}`);
+    console.log(`  Results saved: ${outFile}`);
   }
 }
 
@@ -722,26 +893,28 @@ const { values, positionals } = parseArgs({
     'llm-model': { type: 'string', default: 'claude-sonnet-4-6' },
     'llm-key': { type: 'string', default: '' },
     'hybrid-weight': { type: 'string', default: '0.30' },
+    'multi-palace': { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
   },
 });
 
 if (values.help || !positionals.length) {
-  console.log(`Kullanım: node benchmarks/locomoBench.js <data_file> [seçenekler]
+  console.log(`Usage: node benchmarks/locomoBench.js <data_file> [options]
 
-Seçenekler:
-  --top-k <n>          Top-k retrieval (varsayılan: 50)
-  --mode <mod>         raw | hybrid | rooms | palace (varsayılan: raw)
-  --granularity <g>    dialog | session (varsayılan: session)
-  --limit <n>          İlk N konuşma ile sınırla
-  --out <dosya>        Sonuç JSON dosya yolu
-  --llm-rerank         LLM rerank etkinleştir
-  --llm-model <model>  LLM rerank modeli (varsayılan: claude-sonnet-4-6)
-  --llm-key <key>      API anahtarı (veya ANTHROPIC_API_KEY env)
-  --palace-cache <f>   Palace room cache dosyası
-  --palace-model <m>   Palace room atama modeli
-  --hybrid-weight <w>  Hybrid keyword ağırlığı (varsayılan: 0.30)
-  -h, --help           Bu yardım mesajını göster`);
+Options:
+  --top-k <n>          Top-k retrieval (default: 50)
+  --mode <mode>        raw | hybrid | rooms | palace | system (default: raw)
+  --granularity <g>    dialog | session (default: session)
+  --limit <n>          Limit to first N conversations
+  --out <file>         Output JSON file path
+  --llm-rerank         Enable LLM re-ranking
+  --llm-model <model>  LLM re-rank model (default: claude-sonnet-4-6)
+  --llm-key <key>      API key (or set ANTHROPIC_API_KEY)
+  --palace-cache <f>   Palace room assignment cache file
+  --palace-model <m>   Palace room assignment model
+  --hybrid-weight <w>  Hybrid keyword weight (default: 0.30)
+  --multi-palace       (system mode) split into personal/general palaces
+  -h, --help           Show this help`);
   process.exit(0);
 }
 
@@ -750,6 +923,12 @@ const topK = parseInt(values['top-k'], 10);
 const granularity = values.granularity;
 const mode = values.mode;
 const limitVal = parseInt(values.limit, 10);
+
+const validModes = ['raw', 'hybrid', 'rooms', 'palace', 'system'];
+if (!validModes.includes(mode)) {
+  console.error(`ERROR: invalid mode '${mode}'. Valid: ${validModes.join(', ')}`);
+  process.exit(1);
+}
 
 let outFile = values.out;
 if (!outFile) {
@@ -772,7 +951,8 @@ runBenchmark({
   hybridWeight: parseFloat(values['hybrid-weight']),
   palaceCacheFile: values['palace-cache'],
   palaceModel: values['palace-model'],
+  multiPalace: values['multi-palace'],
 }).catch((err) => {
-  console.error('Benchmark hatası:', err);
+  console.error('Benchmark failed:', err);
   process.exit(1);
 });

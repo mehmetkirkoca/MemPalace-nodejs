@@ -1,7 +1,7 @@
 {
   "name": "mempalace",
   "version": "3.0.0",
-  "description": "AI memory system — store everything verbatim, make it findable through structure",
+  "description": "Persistent memory for AI assistants — verbatim storage, embedding-based routing, knowledge graph, and cross-palace tunnels. 96% recall on LongMemEval.",
   "type": "module",
   "bin": {
     "mempalace": "./bin/mempalace.js"
@@ -20,6 +20,7 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@qdrant/qdrant-js": "^1.12.0",
     "better-sqlite3": "^11.8.0",
+    "kuzu": "^0.11.0",
     "commander": "^13.1.0",
     "fastify": "^5.8.4",
     "js-yaml": "^4.1.0"

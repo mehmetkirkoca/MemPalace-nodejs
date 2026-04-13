@@ -78,14 +78,15 @@ export class VectorStore {
       documents = [content];
       metadatas = [metadata || {}];
     }
-    const BATCH_SIZE = 500;
-    const vectors = await this._embedder.embedBatch(documents);
+    const BATCH_SIZE = 10;
 
     for (let i = 0; i < ids.length; i += BATCH_SIZE) {
       const batchIds = ids.slice(i, i + BATCH_SIZE);
-      const batchVectors = vectors.slice(i, i + BATCH_SIZE);
       const batchDocs = documents.slice(i, i + BATCH_SIZE);
       const batchMeta = metadatas.slice(i, i + BATCH_SIZE);
+
+      // Embed only this batch to avoid large intermediate tensors
+      const batchVectors = await this._embedder.embedBatch(batchDocs);
 
       const points = batchIds.map((id, j) => ({
         id: toQdrantId(id),
@@ -99,6 +100,62 @@ export class VectorStore {
 
       await this._client.upsert(this._collectionName, { points });
     }
+  }
+
+  /**
+   * Upsert documents with pre-computed vectors — no re-embedding.
+   * vectors must be an array of float[] matching documents length.
+   */
+  async addWithVectors({ ids, documents, vectors, metadatas }) {
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      const batchIds = ids.slice(i, i + BATCH_SIZE);
+      const batchVectors = vectors.slice(i, i + BATCH_SIZE);
+      const batchDocs = documents.slice(i, i + BATCH_SIZE);
+      const batchMeta = (metadatas || []).slice(i, i + BATCH_SIZE);
+
+      const points = batchIds.map((id, j) => ({
+        id: toQdrantId(id),
+        vector: batchVectors[j],
+        payload: {
+          document: batchDocs[j],
+          original_id: id,
+          ...(batchMeta[j] || {}),
+        },
+      }));
+
+      await this._client.upsert(this._collectionName, { points });
+    }
+  }
+
+  /**
+   * Search with a pre-computed query vector — no re-embedding.
+   * Returns the same shape as query().
+   */
+  async queryWithVector({ queryVector, nResults = 10, where }) {
+    const filter = convertFilter(where);
+
+    const results = await this._client.search(this._collectionName, {
+      vector: queryVector,
+      limit: nResults,
+      with_payload: true,
+      filter,
+    });
+
+    const ids = results.map((r) => r.payload.original_id);
+    const documents = results.map((r) => r.payload.document);
+    const metadatas = results.map((r) => {
+      const { document, original_id, ...rest } = r.payload;
+      return rest;
+    });
+    const distances = results.map((r) => r.score);
+
+    return {
+      ids: [ids],
+      documents: [documents],
+      metadatas: [metadatas],
+      distances: [distances],
+    };
   }
 
   async query({ queryTexts, nResults = 10, where }) {

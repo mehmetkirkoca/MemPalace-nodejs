@@ -17,7 +17,7 @@ describe('MempalaceConfig', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mempalace-config-test-'));
-    // Env var'ları temizle
+    // Clear env vars
     delete process.env.MEMPALACE_PALACE_PATH;
     delete process.env.MEMPAL_PALACE_PATH;
     delete process.env.QDRANT_URL;
@@ -175,18 +175,18 @@ describe('MempalaceConfig', () => {
       expect(result).toBe(path.join(tmpDir, 'people_map.json'));
       expect(fs.existsSync(path.join(tmpDir, 'people_map.json'))).toBe(true);
 
-      // Yeniden yükle ve kontrol et
+      // Reload and verify
       const config2 = new MempalaceConfig(tmpDir);
       expect(config2.peopleMap).toEqual(peopleMap);
     });
 
     it('should prefer people_map.json over config file people_map', () => {
-      // Config dosyasına people_map yaz
+      // Write people_map to config file
       fs.writeFileSync(
         path.join(tmpDir, 'config.json'),
         JSON.stringify({ people_map: { old: 'Old Name' } }),
       );
-      // Ayrı dosyaya da yaz
+      // Also write to separate file
       fs.writeFileSync(
         path.join(tmpDir, 'people_map.json'),
         JSON.stringify({ new: 'New Name' }),

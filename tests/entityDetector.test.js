@@ -24,16 +24,16 @@ afterAll(() => {
 });
 
 describe('extractCandidates', () => {
-  it('büyük harfle başlayan kelimeleri bulur (3+ tekrar)', () => {
+  it('extracts capitalized words that appear 3+ times', () => {
     const text = 'Alice went to the store. Alice said hello. Alice laughed. Bob is here.';
     const candidates = extractCandidates(text);
     expect(candidates).toHaveProperty('Alice');
     expect(candidates.Alice).toBe(3);
-    // Bob sadece 1 kez geçiyor, aday olmamalı
+    // Bob appears only once — should not be a candidate
     expect(candidates).not.toHaveProperty('Bob');
   });
 
-  it('çok kelimeli isimleri bulur', () => {
+  it('extracts multi-word names', () => {
     const text = [
       'Claude Code is great.',
       'I love Claude Code so much.',
@@ -43,15 +43,15 @@ describe('extractCandidates', () => {
     expect(candidates).toHaveProperty('Claude Code');
   });
 
-  it('stopwords filtrelenir', () => {
-    // "The" birçok kez geçse bile aday olmamalı
+  it('filters out stopwords', () => {
+    // "The" many times — should not be a candidate
     const text = 'The The The The The something. Step Step Step Step.';
     const candidates = extractCandidates(text);
     expect(candidates).not.toHaveProperty('The');
     expect(candidates).not.toHaveProperty('Step');
   });
 
-  it('tek karakterli kelimeleri filtreler', () => {
+  it('filters out single-character words', () => {
     const text = 'I I I I I said something A A A A';
     const candidates = extractCandidates(text);
     expect(candidates).not.toHaveProperty('I');
@@ -60,7 +60,7 @@ describe('extractCandidates', () => {
 });
 
 describe('scoreEntity', () => {
-  it('kişi metni için person score verir', () => {
+  it('gives person score for person-like text', () => {
     const text = [
       'Alice said hello to everyone.',
       'Alice told me about her day.',
@@ -75,7 +75,7 @@ describe('scoreEntity', () => {
     expect(scores.person_signals.length).toBeGreaterThan(0);
   });
 
-  it('proje metni için project score verir', () => {
+  it('gives project score for project-like text', () => {
     const text = [
       'We are building MemPal for the team.',
       'They shipped MemPal last week.',
@@ -90,7 +90,7 @@ describe('scoreEntity', () => {
     expect(scores.project_signals.length).toBeGreaterThan(0);
   });
 
-  it('dialogue pattern kişi sinyali üretir', () => {
+  it('produces person signal from dialogue pattern', () => {
     const text = [
       '> Alice: I think this is great',
       '> Alice: Let me check',
@@ -103,7 +103,7 @@ describe('scoreEntity', () => {
     expect(scores.person_signals.some(s => s.includes('dialogue'))).toBe(true);
   });
 
-  it('pronoun proximity sinyali üretir', () => {
+  it('produces person signal from pronoun proximity', () => {
     const text = [
       'Alice went to the store.',
       'She bought some groceries.',
@@ -119,7 +119,7 @@ describe('scoreEntity', () => {
 });
 
 describe('classifyEntity', () => {
-  it('yüksek person score ile person döner', () => {
+  it('returns person type when person score is high', () => {
     const scores = {
       person_score: 12,
       project_score: 0,
@@ -132,7 +132,7 @@ describe('classifyEntity', () => {
     expect(result.name).toBe('Alice');
   });
 
-  it('yüksek project score ile project döner', () => {
+  it('returns project type when project score is high', () => {
     const scores = {
       person_score: 0,
       project_score: 10,
@@ -144,7 +144,7 @@ describe('classifyEntity', () => {
     expect(result.confidence).toBeGreaterThan(0.5);
   });
 
-  it('sinyal yoksa uncertain döner', () => {
+  it('returns uncertain when no signals present', () => {
     const scores = {
       person_score: 0,
       project_score: 0,
@@ -155,7 +155,7 @@ describe('classifyEntity', () => {
     expect(result.type).toBe('uncertain');
   });
 
-  it('karışık sinyallerde uncertain döner', () => {
+  it('returns uncertain when signals are mixed', () => {
     const scores = {
       person_score: 5,
       project_score: 5,
@@ -166,7 +166,7 @@ describe('classifyEntity', () => {
     expect(result.type).toBe('uncertain');
   });
 
-  it('sadece pronoun match olursa uncertain döner (downgrade)', () => {
+  it('returns uncertain when only pronoun signals match (downgrade)', () => {
     const scores = {
       person_score: 6,
       project_score: 0,
@@ -180,22 +180,22 @@ describe('classifyEntity', () => {
 });
 
 describe('STOPWORDS', () => {
-  it('temel stopwords içerir', () => {
+  it('contains basic stopwords', () => {
     expect(STOPWORDS.has('the')).toBe(true);
     expect(STOPWORDS.has('and')).toBe(true);
     expect(STOPWORDS.has('step')).toBe(true);
     expect(STOPWORDS.has('click')).toBe(true);
   });
 
-  it('entity olabilecek kelimeleri içermez', () => {
+  it('does not include potential entity names', () => {
     expect(STOPWORDS.has('alice')).toBe(false);
     expect(STOPWORDS.has('mempal')).toBe(false);
   });
 });
 
 describe('detectEntities', () => {
-  it('dosyalardan entity tespit eder', () => {
-    // Person metni
+  it('detects entities from files', () => {
+    // Person text
     const personFile = path.join(testDir, 'person.md');
     fs.writeFileSync(personFile, [
       'Alice said hello to everyone.',
@@ -208,7 +208,7 @@ describe('detectEntities', () => {
       'Alice thinks this is good.',
     ].join('\n'));
 
-    // Project metni
+    // Project text
     const projectFile = path.join(testDir, 'project.md');
     fs.writeFileSync(projectFile, [
       'We are building MemPal for the team.',
@@ -229,14 +229,14 @@ describe('detectEntities', () => {
     expect(Array.isArray(result.projects)).toBe(true);
   });
 
-  it('boş dosya listesiyle boş sonuç döner', () => {
+  it('returns empty result for empty file list', () => {
     const result = detectEntities([]);
     expect(result).toEqual({ people: [], projects: [], uncertain: [] });
   });
 });
 
 describe('scanForDetection', () => {
-  it('prose dosyalarını toplar', () => {
+  it('collects prose files', () => {
     const scanDir = path.join(testDir, 'scantest');
     fs.mkdirSync(scanDir, { recursive: true });
     fs.writeFileSync(path.join(scanDir, 'notes.md'), '# Notes');
@@ -245,7 +245,7 @@ describe('scanForDetection', () => {
 
     const files = scanForDetection(scanDir);
     expect(files.length).toBeGreaterThan(0);
-    // prose dosyaları öncelikli
+    // prose files take priority
     const extensions = files.map(f => path.extname(f));
     expect(extensions).toContain('.md');
     expect(extensions).toContain('.txt');

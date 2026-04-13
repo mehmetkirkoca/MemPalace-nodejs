@@ -14,10 +14,16 @@
  * Since ConvoMem has 75K items across many files, we sample a subset for benchmarking.
  * Downloads evidence files from HuggingFace on first run.
  *
+ * Modes:
+ *   raw     - flat VectorStore + cosine search (baseline)
+ *   system  - full MemPalace pipeline: pipelineSave + room-filtered pipelineSearch
+ *
  * Usage:
  *     node benchmarks/convomemBench.js                                # sample 100 items
  *     node benchmarks/convomemBench.js --limit 500                    # sample 500 items
  *     node benchmarks/convomemBench.js --category user_evidence       # one category only
+ *     node benchmarks/convomemBench.js --mode system                  # full pipeline
+ *     node benchmarks/convomemBench.js --mode system --multi-palace   # two-palace routing
  */
 
 import fs from 'fs';
@@ -25,6 +31,15 @@ import path from 'path';
 import { parseArgs } from 'util';
 import { fileURLToPath } from 'url';
 import { VectorStore } from '../src/vectorStore.js';
+import { Embedder } from '../src/embedder.js';
+import {
+  slugifyRoom,
+  selectPalace,
+  selectHall,
+  getHallVectors,
+  scoreImportance,
+} from '../src/mempalacePipeline.js';
+import { createHash } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -148,7 +163,9 @@ async function loadEvidenceItems(categories, limit, cacheDir) {
 // RETRIEVAL
 // =============================================================================
 
-async function retrieveForItem(item, topK = 10, mode = 'raw') {
+const _embedder = new Embedder();
+
+async function retrieveForItem(item, topK = 10, mode = 'raw', multiPalace = false) {
   const conversations = item.conversations || [];
   const question = item.question;
   const evidenceMessages = item.message_evidences || [];
@@ -168,8 +185,109 @@ async function retrieveForItem(item, topK = 10, mode = 'raw') {
     return [0.0, { error: 'empty corpus' }];
   }
 
-  // Use a unique collection name per item to isolate data
   const collectionName = `convomem_bench_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  if (mode === 'system') {
+    // ── System mode: pipelineSave + room-filtered pipelineSearch ──────
+    let palaces, stores;
+    if (multiPalace) {
+      const personalVec = await _embedder.embed(
+        'personal life family health emotions relationships hobbies feelings diary weekend home'
+      );
+      const generalVec = await _embedder.embed(
+        'work technical decisions projects knowledge research facts architecture code'
+      );
+      palaces = [
+        { name: 'sys_personal', scope_vector: personalVec, is_default: false },
+        { name: 'sys_general',  scope_vector: generalVec,  is_default: true  },
+      ];
+      stores = {
+        sys_personal: new VectorStore({ collectionName: `${collectionName}_personal` }),
+        sys_general:  new VectorStore({ collectionName: `${collectionName}_general` }),
+      };
+    } else {
+      palaces = [{ name: 'sys_single', scope_vector: null, is_default: true }];
+      stores = { sys_single: new VectorStore({ collectionName }) };
+    }
+
+    try {
+      for (const store of Object.values(stores)) {
+        await store.deleteCollection();
+        await store.init();
+      }
+
+      // Ingest: embed once per item, reuse vector for palace + hall + Qdrant
+      const hallVectors = await getHallVectors();
+      const docTextToIdx = new Map();
+      for (let i = 0; i < corpus.length; i++) {
+        const vec = await _embedder.embed(corpus[i]);
+        const { name: palaceName } = selectPalace(vec, palaces);
+        const hall = selectHall(vec, hallVectors);
+        const context = corpusSpeakers[i] || '';
+        const room = slugifyRoom(corpus[i] + '\n' + context);
+        const importance = scoreImportance(corpus[i], context);
+        const hash = createHash('md5')
+          .update(corpus[i].slice(0, 100) + i.toString())
+          .digest('hex')
+          .slice(0, 12);
+        const drawerId = `drawer_${room}_${hash}`;
+
+        await stores[palaceName].addWithVectors({
+          ids: [drawerId],
+          documents: [corpus[i]],
+          vectors: [vec],
+          metadatas: [{ room, hall, palace: palaceName, importance, added_by: 'benchmark' }],
+        });
+        if (!docTextToIdx.has(corpus[i])) docTextToIdx.set(corpus[i], i);
+      }
+
+      // Search: embed once, reuse for palace + Qdrant query
+      const qVec = await _embedder.embed(question);
+      const { name: qPalace } = selectPalace(qVec, palaces);
+      const estimatedRoom = slugifyRoom(question);
+      const nRes = Math.min(topK, corpus.length);
+
+      // Room-filtered search first, fall back to unfiltered
+      let rawResults = null;
+      let roomFilterUsed = false;
+      if (estimatedRoom && estimatedRoom !== 'general') {
+        const filtered = await stores[qPalace].queryWithVector({
+          queryVector: qVec,
+          nResults: nRes,
+          where: { room: estimatedRoom },
+        });
+        if (filtered.ids[0].length > 0) {
+          rawResults = filtered;
+          roomFilterUsed = true;
+        }
+      }
+      if (!rawResults) {
+        rawResults = await stores[qPalace].queryWithVector({ queryVector: qVec, nResults: nRes });
+      }
+
+      const retrievedTexts = (rawResults.documents[0] || [])
+        .map((doc) => doc.trim().toLowerCase());
+
+      let found = 0;
+      for (const evText of evidenceTexts) {
+        for (const retText of retrievedTexts) {
+          if (evText.includes(retText) || retText.includes(evText)) {
+            found++;
+            break;
+          }
+        }
+      }
+
+      const recall = evidenceTexts.size > 0 ? found / evidenceTexts.size : 1.0;
+      return [recall, { retrieved_count: retrievedTexts.length, evidence_count: evidenceTexts.size, found, room_filter_used: roomFilterUsed }];
+    } finally {
+      for (const store of Object.values(stores)) {
+        try { await store.deleteCollection(); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  // ── Raw mode ───────────────────────────────────────────────────────
   const store = new VectorStore({ collectionName });
 
   try {
@@ -186,7 +304,6 @@ async function retrieveForItem(item, topK = 10, mode = 'raw') {
       nResults: Math.min(topK, corpus.length),
     });
 
-    // Check if any retrieved message matches evidence
     const retrievedIndices = results.metadatas[0].map((m) => m.idx);
     const retrievedTexts = retrievedIndices.map((i) => corpus[i].trim().toLowerCase());
 
@@ -201,15 +318,7 @@ async function retrieveForItem(item, topK = 10, mode = 'raw') {
     }
 
     const recall = evidenceTexts.size > 0 ? found / evidenceTexts.size : 1.0;
-
-    return [
-      recall,
-      {
-        retrieved_count: retrievedIndices.length,
-        evidence_count: evidenceTexts.size,
-        found,
-      },
-    ];
+    return [recall, { retrieved_count: retrievedIndices.length, evidence_count: evidenceTexts.size, found }];
   } finally {
     await store.deleteCollection();
   }
@@ -219,14 +328,14 @@ async function retrieveForItem(item, topK = 10, mode = 'raw') {
 // BENCHMARK RUNNER
 // =============================================================================
 
-async function runBenchmark(categories, limitPerCat, topK, mode, cacheDir, outFile) {
+async function runBenchmark(categories, limitPerCat, topK, mode, cacheDir, outFile, multiPalace = false) {
   console.log(`\n${'='.repeat(60)}`);
   console.log('  MemPal x ConvoMem Benchmark');
   console.log(`${'='.repeat(60)}`);
   console.log(`  Categories:  ${categories.length}`);
   console.log(`  Limit/cat:   ${limitPerCat}`);
   console.log(`  Top-k:       ${topK}`);
-  console.log(`  Mode:        ${mode}`);
+  console.log(`  Mode:        ${mode}${mode === 'system' && multiPalace ? ' (multi-palace)' : ''}`);
   console.log(`${'─'.repeat(60)}`);
   console.log('\n  Loading data from HuggingFace...\n');
 
@@ -246,7 +355,7 @@ async function runBenchmark(categories, limitPerCat, topK, mode, cacheDir, outFi
     const answer = item.answer || '';
     const catKey = item._category_key || 'unknown';
 
-    const [recall, details] = await retrieveForItem(item, topK, mode);
+    const [recall, details] = await retrieveForItem(item, topK, mode, multiPalace);
     allRecall.push(recall);
 
     if (!perCategory[catKey]) perCategory[catKey] = [];
@@ -323,16 +432,35 @@ const { values: args } = parseArgs({
     mode: { type: 'string', default: 'raw' },
     'cache-dir': { type: 'string', default: '/tmp/convomem_cache' },
     out: { type: 'string', default: '' },
+    'multi-palace': { type: 'boolean', default: false },
+    help: { type: 'boolean', short: 'h', default: false },
   },
 });
+
+if (args.help) {
+  console.log(`Usage: node benchmarks/convomemBench.js [options]
+
+Options:
+  --limit <n>          Items per category (default: 100)
+  --top-k <n>          Top-k retrieval (default: 10)
+  --category <cat>     Category or "all" (default: all)
+  --mode <mode>        raw | system (default: raw)
+  --cache-dir <dir>    HuggingFace cache directory (default: /tmp/convomem_cache)
+  --out <file>         Output JSON file path
+  --multi-palace       (system mode) split into personal/general palaces
+  -h, --help           Show this help`);
+  process.exit(0);
+}
 
 const limit = parseInt(args.limit, 10);
 const topK = parseInt(args['top-k'], 10);
 const mode = args.mode;
 const cacheDir = args['cache-dir'];
+const multiPalace = args['multi-palace'];
 
-if (!['raw'].includes(mode)) {
-  console.error(`Invalid mode: ${mode}. Must be "raw".`);
+const validModes = ['raw', 'system'];
+if (!validModes.includes(mode)) {
+  console.error(`Invalid mode: ${mode}. Valid: ${validModes.join(', ')}`);
   process.exit(1);
 }
 
@@ -350,7 +478,7 @@ const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, 
 const outFile =
   args.out || `benchmarks/results_convomem_${mode}_top${topK}_${timestamp}.json`;
 
-runBenchmark(categories, limit, topK, mode, cacheDir, outFile).catch((err) => {
+runBenchmark(categories, limit, topK, mode, cacheDir, outFile, multiPalace).catch((err) => {
   console.error('Benchmark failed:', err);
   process.exit(1);
 });

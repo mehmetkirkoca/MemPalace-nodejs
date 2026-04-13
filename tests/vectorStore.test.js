@@ -24,9 +24,9 @@ describe('VectorStore', () => {
     await store.add({
       ids: ['drawer_1', 'drawer_2', 'drawer_3'],
       documents: [
-        'İstanbul büyük bir şehirdir',
-        'Ankara Türkiye\'nin başkentidir',
-        'Python programlama dili çok popülerdir',
+        'Istanbul is a large city',
+        'Ankara is the capital of Turkey',
+        'Python is a very popular programming language',
       ],
       metadatas: [
         { wing: 'geography', room: 'cities' },
@@ -41,7 +41,7 @@ describe('VectorStore', () => {
 
   it('should search by text similarity', async () => {
     const results = await store.query({
-      queryTexts: ['şehir ve coğrafya'],
+      queryTexts: ['city and geography'],
       nResults: 2,
     });
 
@@ -49,12 +49,12 @@ describe('VectorStore', () => {
     expect(results.ids).toBeDefined();
     expect(results.ids[0].length).toBeLessThanOrEqual(2);
     // geography-related docs should rank higher
-    expect(results.documents[0][0]).toMatch(/İstanbul|Ankara/);
+    expect(results.documents[0][0]).toMatch(/Istanbul|Ankara/);
   }, 60000);
 
   it('should filter by wing', async () => {
     const results = await store.query({
-      queryTexts: ['bilgi'],
+      queryTexts: ['knowledge'],
       nResults: 10,
       where: { wing: 'geography' },
     });
@@ -67,7 +67,7 @@ describe('VectorStore', () => {
 
   it('should filter with $and', async () => {
     const results = await store.query({
-      queryTexts: ['bilgi'],
+      queryTexts: ['knowledge'],
       nResults: 10,
       where: { $and: [{ wing: 'geography' }, { room: 'capitals' }] },
     });
@@ -78,7 +78,7 @@ describe('VectorStore', () => {
 
   it('should filter with $or', async () => {
     const results = await store.query({
-      queryTexts: ['bilgi'],
+      queryTexts: ['knowledge'],
       nResults: 10,
       where: { $or: [{ wing: 'geography' }, { wing: 'technology' }] },
     });
@@ -106,10 +106,10 @@ describe('VectorStore', () => {
   }, 60000);
 
   it('should check duplicate', async () => {
-    const isDup = await store.checkDuplicate('İstanbul büyük bir şehirdir', 0.9);
+    const isDup = await store.checkDuplicate('Istanbul is a large city', 0.9);
     expect(isDup).toBe(true);
 
-    const isNotDup = await store.checkDuplicate('Kuantum fiziği çok karmaşıktır', 0.9);
+    const isNotDup = await store.checkDuplicate('Quantum physics is very complex', 0.9);
     expect(isNotDup).toBe(false);
   }, 60000);
 });

@@ -7,8 +7,7 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_list_rooms',
   'mempalace_get_taxonomy',
   'mempalace_search',
-  'mempalace_check_duplicate',
-  'mempalace_add_drawer',
+  'mempalace_save',
   'mempalace_delete_drawer',
   'mempalace_kg_query',
   'mempalace_kg_add',
@@ -20,17 +19,17 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_graph_stats',
   'mempalace_diary_write',
   'mempalace_diary_read',
-  'mempalace_guide',
   'mempalace_wake_up',
   'mempalace_recall',
   'mempalace_list_identities',
   'mempalace_setup',
+  'mempalace_palace_create',
 ];
 
 describe('getToolDefinitions', () => {
-  it('returns 23 tool definitions', () => {
+  it('returns 22 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(22);
   });
 
   it('contains all expected tool names', () => {
@@ -76,10 +75,9 @@ describe('TOOLS internal', () => {
     // search: query required
     expect(toolMap.mempalace_search.inputSchema.required).toContain('query');
 
-    // add_drawer: wing, room, content required
-    expect(toolMap.mempalace_add_drawer.inputSchema.required).toEqual(
-      expect.arrayContaining(['wing', 'room', 'content'])
-    );
+    // save: content required, context optional
+    expect(toolMap.mempalace_save.inputSchema.required).toContain('content');
+    expect(toolMap.mempalace_save.inputSchema.required).not.toContain('context');
 
     // delete_drawer: drawer_id required
     expect(toolMap.mempalace_delete_drawer.inputSchema.required).toContain('drawer_id');
@@ -103,11 +101,6 @@ describe('TOOLS internal', () => {
     // diary_read: agent_name required
     expect(toolMap.mempalace_diary_read.inputSchema.required).toContain('agent_name');
 
-    // guide: content required, context and hint_wing optional
-    expect(toolMap.mempalace_guide.inputSchema.required).toContain('content');
-    expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('context');
-    expect(toolMap.mempalace_guide.inputSchema.required).not.toContain('hint_wing');
-
     // wake_up: all optional, has context param
     expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('wing');
     expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('context');
@@ -124,6 +117,11 @@ describe('TOOLS internal', () => {
     expect(toolMap.mempalace_setup.inputSchema.required).toContain('name');
     expect(toolMap.mempalace_setup.inputSchema.required).not.toContain('about');
     expect(toolMap.mempalace_setup.inputSchema.required).not.toContain('preferences');
+
+    // palace_create: name required, scope optional
+    expect(toolMap.mempalace_palace_create.inputSchema.required).toContain('name');
+    expect(toolMap.mempalace_palace_create.inputSchema.required).not.toContain('scope');
+    expect(toolMap.mempalace_palace_create.inputSchema.required).not.toContain('keywords');
   });
 });
 

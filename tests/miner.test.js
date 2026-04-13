@@ -21,7 +21,7 @@ describe('chunkText', () => {
     const content = `${para1}\n\n${para2}`;
 
     const chunks = chunkText(content, 'test.js');
-    // Toplam 602 karakter, CHUNK_SIZE=800 altında, tek chunk olmalı
+    // Total ~602 chars, below CHUNK_SIZE=800 — should be a single chunk
     expect(chunks.length).toBe(1);
     expect(chunks[0].content).toContain('A');
     expect(chunks[0].content).toContain('B');
@@ -38,7 +38,7 @@ describe('chunkText', () => {
     const chunks = chunkText(content, 'test.js');
     expect(chunks.length).toBeGreaterThan(1);
 
-    // Her chunk CHUNK_SIZE'dan büyük olmamalı (boundary arama nedeniyle küçük tolerans)
+    // Each chunk should not exceed CHUNK_SIZE (small tolerance for boundary search)
     for (const chunk of chunks) {
       expect(chunk.content.length).toBeLessThanOrEqual(CHUNK_SIZE + 10);
     }
@@ -65,7 +65,7 @@ describe('chunkText', () => {
   });
 
   it('should try line boundary before hard break', () => {
-    // CHUNK_SIZE'ı aşan içerik, satır sonlarıyla
+    // Content exceeding CHUNK_SIZE, split at line boundaries
     const lines = [];
     for (let i = 0; i < 20; i++) {
       lines.push(`Line ${i}: ${'Y'.repeat(60)}`);
@@ -104,7 +104,7 @@ describe('GitignoreMatcher', () => {
 
     // Dizin olarak match etmeli
     expect(matcher.matches(path.join(tmpDir, 'build'), true)).toBe(true);
-    // Dosya olarak match ETMEMELİ (dir_only pattern)
+    // Should NOT match as file (dir_only pattern)
     expect(matcher.matches(path.join(tmpDir, 'build'), false)).toBe(null);
   });
 
@@ -126,7 +126,7 @@ describe('GitignoreMatcher', () => {
     const matcher = GitignoreMatcher.fromDir(tmpDir);
 
     expect(matcher.matches(path.join(tmpDir, 'dist'), false)).toBe(true);
-    // Alt dizindeki dist match ETMEMELİ (anchored)
+    // Should NOT match dist in subdirectory (anchored pattern)
     expect(matcher.matches(path.join(tmpDir, 'src', 'dist'), false)).toBe(null);
   });
 
@@ -181,7 +181,7 @@ describe('detectRoom', () => {
 
   it('should prioritize folder path over content keywords', () => {
     const projectPath = '/project';
-    // Dosya frontend klasöründe ama içerik backend keyword'leri içeriyor
+    // File is in frontend folder but content contains backend keywords
     const content = 'api server express endpoint controller';
     const result = detectRoom('/project/frontend/helper.js', content, rooms, projectPath);
     expect(result).toBe('frontend');

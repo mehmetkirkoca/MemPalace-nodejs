@@ -43,8 +43,8 @@ export const MIN_CHUNK_SIZE = 50;
 // =============================================================================
 
 /**
- * fnmatch-style pattern matching (Python fnmatch uyumlu).
- * Glob pattern'ini regex'e çevirir: *, ?, [seq] destekler.
+ * fnmatch-style pattern matching (compatible with Python fnmatch).
+ * Converts glob patterns to regex: supports *, ?, [seq].
  */
 function fnmatchMatch(name, pattern) {
   let regex = '^';
