@@ -7,7 +7,7 @@
  *   mempalace mine <dir>                  Mine project files
  *   mempalace mine <dir> --mode convos    Mine conversation exports
  *   mempalace search "query"              Find anything, exact words
- *   mempalace wake-up                     Show L0 + L1 wake-up context
+ *   mempalace illuminate                  Show L0 + L1 wake-up context
  *   mempalace split <dir>                 Split concatenated mega-files
  *   mempalace repair                      Rebuild palace vector index
  *   mempalace status                      Show what's been filed
@@ -165,28 +165,42 @@ function createProgram() {
       }
     });
 
-  // ── wake-up ─────────────────────────────────────────────────────────────────
+  async function runIlluminate(opts) {
+    try {
+      const { illuminateMemory } = await import('./mcpServer.js');
+      const result = await illuminateMemory({ wing: opts.wing, context: opts.context });
+      const text = [
+        result.l0_identity,
+        '',
+        result.l1_essential,
+        '',
+        result.note,
+      ].filter(Boolean).join('\n');
+      const tokens = Math.floor(text.length / 4);
+      console.log(`Illuminate text (~${tokens} tokens):`);
+      console.log('='.repeat(50));
+      console.log(text);
+    } catch (err) {
+      console.error(`  Error: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  // ── illuminate ──────────────────────────────────────────────────────────────
+  program
+    .command('illuminate')
+    .description('Show L0 + L1 illuminate context (~600-900 tokens)')
+    .option('--wing <wing>', 'Illuminate for a specific project/wing')
+    .option('--context <text>', 'Context used to auto-select the right palace')
+    .action(runIlluminate);
+
+  // Backwards-compatible alias for the old command name.
   program
     .command('wake-up')
-    .description('Show L0 + L1 wake-up context (~600-900 tokens)')
-    .option('--wing <wing>', 'Wake-up for a specific project/wing')
-    .action(async (opts) => {
-      try {
-        const { MemoryStack } = await import('./layers.js');
-
-        const stack = new MemoryStack();
-        await stack.init();
-
-        const text = await stack.wakeUp({ wing: opts.wing });
-        const tokens = Math.floor(text.length / 4);
-        console.log(`Wake-up text (~${tokens} tokens):`);
-        console.log('='.repeat(50));
-        console.log(text);
-      } catch (err) {
-        console.error(`  Error: ${err.message}`);
-        process.exit(1);
-      }
-    });
+    .description('Alias for illuminate')
+    .option('--wing <wing>', 'Illuminate for a specific project/wing')
+    .option('--context <text>', 'Context used to auto-select the right palace')
+    .action(runIlluminate);
 
   // ── split ───────────────────────────────────────────────────────────────────
   program

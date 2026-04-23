@@ -1,5 +1,9 @@
 # MemPalace
 
+<p align="center">
+  <img src="assets/brain.png" alt="MemPalace" width="300" />
+</p>
+
 Persistent, searchable memory for the AI assistants you already use. MemPalace gives Claude, Cursor, or any MCP-compatible AI a long-term memory that persists across sessions — without summarizing, without losing context, without changing how you work.
 
 Think of it as external long-term memory: your AI keeps working exactly the same way, but now it remembers.
@@ -16,16 +20,6 @@ Most AI assistants forget everything when a conversation ends. MemPalace fixes t
 - **Connects facts** — knowledge graph links people, projects, and events
 - **Cross-domain tunnels** — finds unexpected connections between different memory palaces
 
-### Benchmark Results
-
-| Benchmark | R@5 | R@10 | NDCG@10 | Questions |
-|-----------|-----|------|---------|-----------|
-| **LongMemEval** (Microsoft) | **96.0%** | **98.4%** | **89.1%** | 500 |
-
-Retrieval runs fully locally (no extra API calls for search). Verified 2026-04-11.
-
-**MemPalace achieves the highest published LongMemEval score among systems that do not use an LLM for retrieval or reranking.**
-
 ---
 
 ## Getting Started
@@ -36,7 +30,7 @@ Retrieval runs fully locally (no extra API calls for search). Verified 2026-04-1
 docker compose up -d
 ```
 
-Starts MemPalace and its vector database. That's it.
+Starts MemPalace, Qdrant (vector store), and Neo4j (graph database). That's it.
 
 ### 2. Connect Claude Code
 
@@ -50,9 +44,9 @@ Or open this repo in Claude Code — the included `.mcp.json` auto-prompts for a
 
 Claude will now remember things across sessions. Zero extra configuration — the MCP server ships with a built-in memory protocol that activates automatically:
 
-- On wake-up, Claude auto-selects the right memory palace and loads top memories
+- On illuminate, Claude auto-selects the right memory palace and loads top memories
 - Before answering factual questions, Claude queries memory instead of guessing
-- When you share new information, Claude routes it to the right palace/room/hall automatically
+- When you share new information, Claude routes it to the right palace/wing/hall/room/closet automatically
 - At session end, Claude writes to its own diary
 
 You can also tell Claude explicitly:
@@ -65,36 +59,45 @@ MemPalace figures out where to store it.
 
 ## How Memory is Organized
 
-A 4-layer hierarchy — modeled after the real memory palace technique:
+A 5-layer hierarchy — modeled after the real memory palace technique:
 
 ```
-Palace  →  Room  →  Hall  →  Drawer
-──────     ─────    ────      ──────
-code       docker   facts     individual memory
-research   health   events    (verbatim text)
-personal   sprint   discover.
+Palace  →  Wing  →  Hall  →  Room  →  Closet  →  Drawer
+──────     ────      ────     ────      ──────      ──────
+code       Backend   PHP      Laravel   Overview    individual memory
+research   Health    Diet     Vitamins  Vitamin D   (verbatim text)
+personal   Work      Sprint   Auth      Decisions
 ```
 
 | Layer | What it is |
 |-------|------------|
 | **Palace** | A separate memory space for a domain (code, research, personal) |
-| **Room** | A named topic within a palace (e.g. `docker-setup`, `auth-flow`) |
-| **Hall** | Memory type — facts, events, preferences, discoveries, advice |
+| **Wing** | Broad domain within a palace (e.g. `Backend`, `Health`, `Personal`) |
+| **Hall** | Sub-domain (e.g. `PHP`, `Nutrition`, `Sprint`) |
+| **Room** | Specific topic (e.g. `Laravel`, `Vitamins`, `Auth`) |
+| **Closet** | Fine-grained sub-topic (e.g. `Overview`, `Routing`, `Caching`) |
 | **Drawer** | One verbatim memory (text + metadata + embedding) |
 
 **Content is never summarized.** Every drawer stores the original words. The search model finds the right drawer — no information is thrown away.
 
-### Embedding-Based Auto-Routing
+### Saving Content
 
-`mempalace_save` needs no wing, room, or hall from you. It:
+`mempalace_save` requires explicit categorization — call `mempalace_get_taxonomy` first to see the existing hierarchy, then pass the correct wing/hall/room/closet:
 
-1. Embeds the content with `all-MiniLM-L6-v2`
-2. Selects the palace via cosine similarity against each palace's `scope` vector
-3. Selects the hall via cosine similarity against 5 pre-embedded hall descriptions
-4. Derives the room slug from content keywords
-5. Deduplicates before storing
+```
+mempalace_save({
+  palace: "programming_palace",
+  wing: "Backend",
+  hall: "PHP",
+  room: "Laravel",
+  closet: "Overview",
+  content: "Laravel is a backend framework..."
+})
+```
 
-If content doesn't match any existing palace well (similarity < 0.35), it suggests creating a new one.
+New palaces are auto-registered in the palace registry on first save — no separate setup needed.
+
+Deduplication runs automatically before storing (cosine similarity ≥ 0.9 triggers a duplicate warning).
 
 ### Cross-Palace Tunnels
 
@@ -108,8 +111,8 @@ This mirrors the Default Mode Network in the human brain — the system that con
 
 | Layer | Tool | What it loads | When |
 |-------|------|---------------|------|
-| **L0** Identity | `mempalace_wake_up` | Who you are, rules, preferences | Every session start |
-| **L1** Essential | `mempalace_wake_up` | Top 15 highest-importance memories | Every session start |
+| **L0** Identity | `mempalace_illuminate` | Who you are, rules, preferences | Every session start |
+| **L1** Essential | `mempalace_illuminate` | Top 15 highest-importance memories | Every session start |
 | **L2** On-demand | `mempalace_recall` | All drawers in a specific room | When a topic comes up |
 | **L3** Semantic | `mempalace_search` | Nearest matches by meaning | When searching |
 
@@ -121,7 +124,7 @@ This mirrors the Default Mode Network in the human brain — the system that con
 
 | Category | Tools |
 |----------|-------|
-| **Session** | `mempalace_wake_up`, `mempalace_recall` |
+| **Session** | `mempalace_illuminate`, `mempalace_recall` |
 | **Setup** | `mempalace_setup`, `mempalace_palace_create`, `mempalace_list_identities` |
 | **Storage** | `mempalace_save`, `mempalace_delete_drawer` |
 | **Search** | `mempalace_search`, `mempalace_status` |
@@ -134,9 +137,9 @@ This mirrors the Default Mode Network in the human brain — the system that con
 
 ## Multi-Palace Setup
 
-Each palace is a separate Qdrant collection with its own routing config. The right palace is auto-selected based on content embeddings.
+Each palace is a separate Qdrant collection with its own routing config. When searching without specifying a palace, MemPalace auto-selects the best match using cosine similarity against each palace's scope vector.
 
-Create a palace with a scope description — MemPalace embeds it and uses cosine similarity to route content automatically:
+Create a palace with a scope description to improve search routing:
 
 ```
 mempalace_palace_create({
@@ -148,11 +151,13 @@ mempalace_palace_create({
 
 Default palace (`personality_memory_palace`) stores personal identity, preferences, and general notes — used as fallback when no other palace matches.
 
+Palaces are auto-registered in the palace registry on first `mempalace_save`, so you don't need to call `mempalace_palace_create` before saving. Use `mempalace_palace_create` when you want to pre-configure routing keywords, `l0_body`, or `wing_focus`.
+
 ---
 
 ## Knowledge Graph
 
-Beyond vector search, MemPalace maintains a temporal knowledge graph (SQLite):
+Beyond vector search, MemPalace maintains a temporal knowledge graph in Neo4j:
 
 ```
 mempalace_kg_add({ subject: "Alice", predicate: "works_on", object: "AuthService" })
@@ -179,7 +184,7 @@ docker compose run --rm mempalace-cli bin/mempalace.js status
 ## Development
 
 ```bash
-git clone https://github.com/your-org/mempalace.git
+git clone <repo-url>
 cd mempalace
 npm install
 docker compose up -d
@@ -199,21 +204,14 @@ docker compose --profile dev up
 | Component | Role |
 |-----------|------|
 | **Qdrant** | Vector store — semantic search, embeddings, cosine similarity |
-| **Kuzu** | Graph DB (embedded) — palace/room/hall topology, cross-palace tunnels |
-| **SQLite** | Temporal knowledge graph — entity facts with time windows |
+| **Neo4j** | Graph DB — taxonomy, topology, tunnels, and temporal knowledge graph |
 | **all-MiniLM-L6-v2** | Local embedding model (384-dim, L2-normalized) — zero API calls |
-
----
-
-## Benchmarks
-
-Full reproduction guide and raw result files: [`benchmarks/`](benchmarks/)
 
 ---
 
 ## Credits
 
-Node.js port of the original [MemPalace](https://github.com/aya-thekeeper/mempal) by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). Core architecture, verbatim-first storage, and benchmark methodology belong to the original authors.
+Node.js port of the original [MemPalace](https://github.com/aya-thekeeper/mempal) by [bensig](https://github.com/bensig) and [milla-jovovich](https://github.com/milla-jovovich). Core architecture and verbatim-first storage belong to the original authors.
 
 ## License
 

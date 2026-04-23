@@ -69,6 +69,21 @@ export class MempalaceConfig {
     return process.env.QDRANT_URL || 'http://localhost:6333';
   }
 
+  /** Neo4j connection URI. */
+  get neo4jUri() {
+    return process.env.NEO4J_URI || 'bolt://localhost:7687';
+  }
+
+  /** Neo4j username. */
+  get neo4jUser() {
+    return process.env.NEO4J_USER || 'neo4j';
+  }
+
+  /** Neo4j password. */
+  get neo4jPassword() {
+    return process.env.NEO4J_PASSWORD || 'mempalace';
+  }
+
   /** Mapping of name variants to canonical names. */
   get peopleMap() {
     if (fs.existsSync(this._peopleMapFile)) {

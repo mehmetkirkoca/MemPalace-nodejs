@@ -23,7 +23,7 @@
  *   mempalace_kg_stats        — graph overview
  *
  * Tools (navigation):
- *   mempalace_traverse        — BFS walk from a room across the Kuzu graph
+ *   mempalace_traverse        — BFS walk from a room across the topology graph
  *   mempalace_find_tunnels    — cross-palace rooms (shared topic nodes)
  *   mempalace_graph_stats     — palace/room/drawer/tunnel counts
  *
@@ -37,7 +37,7 @@
  *   mempalace_setup           — first-time setup (name, preferences, rules)
  *
  * Tools (memory stack):
- *   mempalace_wake_up         — L0 identity + L1 essential story (call on session start)
+ *   mempalace_illuminate     — L0 identity + L1 essential story (call on session start)
  *   mempalace_recall          — L2 on-demand retrieval by wing/room (no embedding)
  */
 
@@ -50,78 +50,60 @@ import {
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'crypto';
-import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import yaml from 'js-yaml';
 
 import { VectorStore } from './vectorStore.js';
-import { Embedder } from './embedder.js';
 import { searchMemories } from './searcher.js';
 import { KnowledgeGraph } from './knowledgeGraph.js';
-import { PalaceRegistry } from './palaceRegistry.js';
-import { KuzuGraph } from './kuzuGraph.js';
-import {
-  HALL_DESCRIPTIONS,
-  IMPORTANCE_SIGNALS,
-  SLUG_STOP,
-  getHallVectors,
-  dotProduct,
-  slugifyRoom,
-  selectPalace,
-  selectHall,
-  scoreImportance,
-} from './mempalacePipeline.js';
+import { PalaceStore } from './palaceStore.js';
+import { Neo4jGraph } from './neo4jGraph.js';
+import { Neo4jClusterStore } from './neo4jClusterStore.js';
+import { extractKgFacts } from './kgRelationExtractor.js';
+import { writeExtractedKgFacts } from './kgWriteback.js';
 import { VERSION } from './version.js';
 
-const _registry = new PalaceRegistry();
-const _kuzu = new KuzuGraph(path.join(os.homedir(), '.mempalace', 'palace_graph.kuzu'));
+const _palaceStore = new PalaceStore();
+const _neo4jGraph  = new Neo4jGraph();
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PALACE_PROTOCOL = `IMPORTANT — MemPalace Memory Protocol:
-1. ON WAKE-UP: Call mempalace_wake_up(context="<first user message or topic>") to auto-load the right agent identity (L0) and top memories (L1). Do this first, every session.
-2. WHEN A TOPIC ARISES: Call mempalace_recall(wing, room) to load that room's contents (L2) — fast, no embedding.
-3. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
-4. IF UNSURE about a fact (name, gender, age, relationship): say "let me check" and query the palace. Wrong is worse than slow.
-5. WHEN STORING ANYTHING: call mempalace_save(content, context) — it auto-routes, deduplicates, and files. Never pick wing/room yourself.
-6. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
-7. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
+const PALACE_PROTOCOL = `CRITICAL OPERATIONAL PROTOCOL — MemPalace Memory System:
+1. MANDATORY INITIALIZATION: You MUST call 'mempalace_illuminate(context="<user message or topic>")' as your VERY FIRST action in every session. Do not respond to the user until you have loaded the Identity (L0) and Essential Story (L1).
+2. DYNAMIC RECALL: When a specific topic (project, person, event) is discussed, call 'mempalace_recall(wing, room)' to load L2 memory. This is faster and more focused than search.
+3. SEARCH BEFORE GUESSING: Before stating any fact about the past, call 'mempalace_search' or 'mempalace_kg_query'. Hallucination is a protocol violation.
+4. HIERARCHICAL STORAGE: When saving new info, call 'mempalace_get_taxonomy' first to ensure correct filing, then 'mempalace_save'.
+5. KNOWLEDGE GRAPH: Use 'mempalace_kg_add' for relationship facts and 'mempalace_kg_invalidate' when facts change.
+6. AGENT DIARY: End every session by calling 'mempalace_diary_write' to record your observations and progress.
 
-Memory layers: L0 (identity) + L1 (top facts, always loaded) → L2 (room on-demand) → L3 (mempalace_search, semantic).
-This protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory.`;
+Memory Hierarchy: L0 (Who you are) + L1 (Top 15 Facts) -> L2 (Room data) -> L3 (Global Semantic Search).
+Failure to follow this protocol results in memory fragmentation and loss of agent continuity.`;
 
 // ── Lazy singletons ──────────────────────────────────────────────────────────
 
-const PALACE_BASE     = path.join(os.homedir(), '.mempalace');
-const DEFAULT_PALACE  = 'personality_memory_palace';
-const DEFAULT_KG_PATH = path.join(PALACE_BASE, 'knowledge_graph.sqlite3');
-
-// Active palace state — set by toolWakeUp when an identity is selected
-let _activePalace = DEFAULT_PALACE;
-let _activeKgPath = DEFAULT_KG_PATH;
+const DEFAULT_PALACE = 'personality_memory_palace';
 
 // Per-palace caches
 const _stores = {};
-const _kgs = {};
+const _kgs   = {};
 
-async function getStore() {
-  if (!_stores[_activePalace]) {
-    _stores[_activePalace] = new VectorStore({
+async function getStore(palace = DEFAULT_PALACE) {
+  if (!_stores[palace]) {
+    _stores[palace] = new VectorStore({
       qdrantUrl: process.env.QDRANT_URL || 'http://localhost:6333',
-      collectionName: _activePalace,
+      collectionName: palace,
     });
-    await _stores[_activePalace].init();
+    await _stores[palace].init();
   }
-  return _stores[_activePalace];
+  return _stores[palace];
 }
 
-function getKg() {
-  if (!_kgs[_activeKgPath]) {
-    _kgs[_activeKgPath] = new KnowledgeGraph(_activeKgPath);
+function getKg(palace = DEFAULT_PALACE) {
+  if (!_kgs[palace]) {
+    _kgs[palace] = new KnowledgeGraph(palace);
   }
-  return _kgs[_activeKgPath];
+  return _kgs[palace];
 }
+
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
@@ -134,8 +116,8 @@ function noPalace() {
 
 // ── Read Tool Handlers ──────────────────────────────────────────────────────
 
-async function toolStatus() {
-  const store = await getStore();
+async function toolStatus({ palace = DEFAULT_PALACE } = {}) {
+  const store = await getStore(palace);
   let count;
   try {
     count = await store.count();
@@ -165,8 +147,8 @@ async function toolStatus() {
   };
 }
 
-async function toolListWings() {
-  const store = await getStore();
+async function toolListWings({ palace = DEFAULT_PALACE } = {}) {
+  const store = await getStore(palace);
   let allMeta;
   try {
     allMeta = await store.get({ limit: 10000 });
@@ -182,8 +164,8 @@ async function toolListWings() {
   return { wings };
 }
 
-async function toolListRooms({ wing } = {}) {
-  const store = await getStore();
+async function toolListRooms({ wing, palace = DEFAULT_PALACE } = {}) {
+  const store = await getStore(palace);
   const opts = { limit: 10000 };
   if (wing) {
     opts.where = { wing };
@@ -204,32 +186,30 @@ async function toolListRooms({ wing } = {}) {
   return { wing: wing || 'all', rooms };
 }
 
-async function toolGetTaxonomy() {
-  const store = await getStore();
-  let allMeta;
-  try {
-    allMeta = await store.get({ limit: 10000 });
-  } catch {
-    return noPalace();
-  }
-
-  const taxonomy = {};
-  for (const m of allMeta.metadatas) {
-    const w = m.wing || 'unknown';
-    const r = m.room || 'unknown';
-    if (!taxonomy[w]) taxonomy[w] = {};
-    taxonomy[w][r] = (taxonomy[w][r] || 0) + 1;
-  }
-  return { taxonomy };
+async function toolGetTaxonomy({ palace = DEFAULT_PALACE } = {}) {
+  const clusters = new Neo4jClusterStore(palace);
+  const tree = await clusters.getTree();
+  const text = await clusters.getTaxonomyText();
+  return { taxonomy: tree, taxonomy_text: text };
 }
 
-async function toolSearch({ query, limit = 5, wing, room }) {
-  const store = await getStore();
-  return searchMemories(query, store, { wing, room, nResults: limit });
+async function toolSearch({ query, limit = 5, wing, room, palace }) {
+  let activePalace = palace;
+
+  // If no palace specified, try to semantically route based on the query
+  if (!activePalace) {
+    const matched = await _palaceStore.selectByContext(query);
+    activePalace = matched?.name || DEFAULT_PALACE;
+  }
+
+  const store = await getStore(activePalace);
+  const result = await searchMemories(query, store, { wing, room, nResults: limit });
+  return { ...result, searched_palace: activePalace };
 }
 
-async function toolCheckDuplicate({ content, threshold = 0.9 }) {
-  const store = await getStore();
+async function toolCheckDuplicate({ content, threshold = 0.9, palace = DEFAULT_PALACE }) {
+  const store = await getStore(palace);
+  const normalizedContent = content.trim();
   try {
     const results = await store.query({
       queryTexts: [content],
@@ -250,6 +230,7 @@ async function toolCheckDuplicate({ content, threshold = 0.9 }) {
             wing: meta.wing || '?',
             room: meta.room || '?',
             similarity,
+            exact_match: doc.trim() === normalizedContent,
             content: doc.length > 200 ? doc.slice(0, 200) + '...' : doc,
           });
         }
@@ -268,119 +249,155 @@ async function toolCheckDuplicate({ content, threshold = 0.9 }) {
 
 // ── Write Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolSave({ content, context, added_by = 'mcp' }) {
-  if (!content || !content.trim()) {
-    return { error: 'content is required' };
-  }
-
-  // Embed once — reuse for hall classification + palace routing
-  const combined = `${content}\n${context || ''}`;
-  const embedder = new Embedder();
-  const contentVector = await embedder.embed(combined);
-
-  // Hall via embedding
-  const hallVectors = await getHallVectors();
-  const hall = selectHall(contentVector, hallVectors);
-
-  // Palace via embedding
-  const palaces = _loadPalaces();
-  const { name: palaceToUse, similarity: palaceSim } = selectPalace(contentVector, palaces);
-  const palace = palaces.find(p => p.name === palaceToUse);
-
-  // Wing from palace config; room from content keywords
-  const wing = palace?.wing_focus || 'wing_myproject';
-  const room = slugifyRoom(combined);
-  const importance = scoreImportance(content, context);
-
-  // Similarity < 0.35 means no palace is a good fit — suggest creating one
-  const weakMatch = palaceSim < 0.35;
-
-  const prevPalace = _activePalace;
-  _activePalace = palaceToUse;
-
-  try {
-    // Dedup in the correct palace
-    const dup = await toolCheckDuplicate({ content, threshold: 0.9 });
-    if (dup.is_duplicate) {
-      return { success: false, reason: 'duplicate', matches: dup.matches };
-    }
-
-    // File it
-    const result = await toolAddDrawer({ wing, room, content, hall, importance, added_by });
-
-    const isGenericWing = wing === 'wing_myproject';
-    const isGenericRoom = room === 'general';
-    const confidence = (!isGenericWing && !isGenericRoom) ? 'high'
-      : (isGenericWing && isGenericRoom) ? 'low' : 'medium';
-
-    const response = { ...result, routed_to: { wing, room, hall, importance }, palace: palaceToUse, confidence };
-
-    if (weakMatch) {
-      response.suggest_palace_create = true;
-      response.suggestion = `Content matched existing palaces weakly (similarity: ${palaceSim.toFixed(2)}). Consider creating a new palace for this type of content. Use mempalace_palace_create with: name, scope (what content belongs here), and keywords.`;
-    } else if (confidence === 'low') {
-      response.note = `Filed to ${wing}/${room} — routing uncertain. Pass 'context' for better accuracy.`;
-    }
-
-    return response;
-  } finally {
-    _activePalace = prevPalace;
-  }
-}
-
-async function toolAddDrawer({ wing, room, content, hall, importance = 3, source_file, added_by = 'mcp' }) {
-  const store = await getStore();
-
-  // Duplicate check
-  const dup = await toolCheckDuplicate({ content, threshold: 0.9 });
-  if (dup.is_duplicate) {
+async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', palace }) {
+  if (!content || !content.trim()) return { error: 'content is required' };
+  if (!palace || !palace.trim()) {
     return {
-      success: false,
-      reason: 'duplicate',
-      matches: dup.matches,
+      error: 'palace is required',
+      hint: 'Call mempalace_list_identities first, then pass the target palace explicitly.',
     };
   }
+  if (!wing || !hall || !room || !closet) {
+    return {
+      error: 'wing, hall, room, and closet are required',
+      hint: 'Call mempalace_get_taxonomy first to see the existing hierarchy, then decide where this content belongs.',
+    };
+  }
+
+  const dup = await toolCheckDuplicate({ content, threshold: 0.9, palace });
+  if (dup.is_duplicate) {
+    if (dup.matches.some((match) => match.exact_match)) {
+      return { success: false, reason: 'duplicate', matches: dup.matches };
+    }
+  }
+
+  // Auto-register palace in the palace store if it doesn't exist yet
+  const existingPalaces = await _palaceStore.getAll();
+  if (!existingPalaces.find((p) => p.name === palace)) {
+    await _palaceStore.upsert({
+      name: palace,
+      description: `Auto-registered palace: ${palace}`,
+      scope: palace.replace(/_/g, ' '),
+      is_default: false,
+    });
+  }
+
+  const clusters = new Neo4jClusterStore(palace);
+  const { wingId, hallId, roomId, closetId } = await clusters.assign(wing, hall, room, closet);
+
+  const result = await toolAddDrawer({
+    wing, wing_id: wingId, wing_name: wing,
+    hall, hall_id: hallId, hall_name: hall,
+    room, room_id: roomId, room_name: room,
+    closet, closet_id: closetId, closet_name: closet,
+    content, added_by, palace,
+  });
+
+  return { ...result, filed_at: { wing, hall, room, closet } };
+}
+
+async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_name, room, room_id, room_name, closet, closet_id, closet_name, content, source_file, added_by = 'mcp', palace = DEFAULT_PALACE }) {
+  const store = await getStore(palace);
 
   const hash = crypto
     .createHash('md5')
     .update(content.slice(0, 100) + new Date().toISOString())
     .digest('hex')
-    .slice(0, 16);
-  const drawerId = `drawer_${wing}_${room}_${hash}`;
+    .slice(0, 12);
+  const drawerId = `dra_${hash}`;
 
   const payload = {
     ids: [drawerId],
     documents: [content],
-    metadatas: [
-      {
-        wing,
-        room,
-        hall: hall || 'hall_facts',
-        importance,
-        source_file: source_file || '',
-        chunk_index: 0,
-        added_by,
-        filed_at: new Date().toISOString(),
-      },
-    ],
+    metadatas: [{
+      wing:         wing_id    || wing    || 'unknown',
+      wing_name:    wing_name  || wing    || 'unknown',
+      hall:         hall_id    || hall    || 'unknown',
+      hall_name:    hall_name  || hall    || 'unknown',
+      room:         room_id    || room    || 'unknown',
+      room_name:    room_name  || room    || 'unknown',
+      closet:       closet_id  || closet  || 'unknown',
+      closet_name:  closet_name || closet || 'unknown',
+      source_file:  source_file || '',
+      added_by,
+      filed_at:     new Date().toISOString(),
+    }],
   };
 
   try {
     await store.add(payload);
-    // Update Kuzu graph topology (fire-and-forget — don't block save)
-    _kuzu.mergeDrawer(_activePalace, room, hall || 'hall_facts', drawerId, importance)
-      .catch(() => {});
-    return { success: true, drawer_id: drawerId, wing, room };
+    _neo4jGraph.mergeDrawer(palace, room_name || room, hall_name || hall, drawerId).catch(() => {});
+    let kgExtraction = null;
+    try {
+      const facts = await extractKgFacts(content, {
+        palace,
+        wing: wing_name || wing,
+        hall: hall_name || hall,
+        room: room_name || room,
+        closet: closet_name || closet,
+        filedAt: payload.metadatas[0].filed_at,
+      });
+      const writes = await writeExtractedKgFacts({ palace, drawerId, facts });
+      kgExtraction = {
+        candidates: facts.length,
+        written: writes.length,
+        facts: writes,
+      };
+    } catch (kgError) {
+      kgExtraction = {
+        candidates: 0,
+        written: 0,
+        error: kgError.message,
+      };
+    }
+    return {
+      success: true,
+      drawer_id: drawerId,
+      wing: wing_name || wing,
+      hall: hall_name || hall,
+      room: room_name || room,
+      closet: closet_name || closet,
+      kg_extraction: kgExtraction,
+    };
   } catch (e) {
-    // Collection was deleted externally — recreate and retry once
     if (e.message?.includes('Not Found') || e.status === 404 || e.statusCode === 404) {
-      delete _stores[_activePalace];
+      delete _stores[palace];
       try {
-        const freshStore = await getStore();
+        const freshStore = await getStore(palace);
         await freshStore.add(payload);
-        _kuzu.mergeDrawer(_activePalace, room, hall || 'hall_facts', drawerId, importance)
-          .catch(() => {});
-        return { success: true, drawer_id: drawerId, wing, room };
+        _neo4jGraph.mergeDrawer(palace, room_name || room, hall_name || hall, drawerId).catch(() => {});
+        let kgExtraction = null;
+        try {
+          const facts = await extractKgFacts(content, {
+            palace,
+            wing: wing_name || wing,
+            hall: hall_name || hall,
+            room: room_name || room,
+            closet: closet_name || closet,
+            filedAt: payload.metadatas[0].filed_at,
+          });
+          const writes = await writeExtractedKgFacts({ palace, drawerId, facts });
+          kgExtraction = {
+            candidates: facts.length,
+            written: writes.length,
+            facts: writes,
+          };
+        } catch (kgError) {
+          kgExtraction = {
+            candidates: 0,
+            written: 0,
+            error: kgError.message,
+          };
+        }
+        return {
+          success: true,
+          drawer_id: drawerId,
+          wing: wing_name || wing,
+          hall: hall_name || hall,
+          room: room_name || room,
+          closet: closet_name || closet,
+          kg_extraction: kgExtraction,
+        };
       } catch (e2) {
         return { success: false, error: e2.message };
       }
@@ -389,8 +406,22 @@ async function toolAddDrawer({ wing, room, content, hall, importance = 3, source
   }
 }
 
-async function toolDeleteDrawer({ drawer_id }) {
-  const store = await getStore();
+async function toolDeleteDrawer({ drawer_id, palace = DEFAULT_PALACE }) {
+  // Closet node (taxonomy structural node in Neo4j) — not a vector store entry
+  if (drawer_id.startsWith('clo_')) {
+    try {
+      const clusters = new Neo4jClusterStore(palace);
+      const { deleted } = await clusters.deleteCloset(drawer_id);
+      if (deleted === 0) {
+        return { success: false, error: `Closet not found: ${drawer_id}` };
+      }
+      return { success: true, drawer_id };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  const store = await getStore(palace);
   try {
     // Try to get existing first
     const existing = await store.get({ where: { original_id: drawer_id }, limit: 1 });
@@ -398,7 +429,7 @@ async function toolDeleteDrawer({ drawer_id }) {
       return { success: false, error: `Drawer not found: ${drawer_id}` };
     }
     await store.delete({ ids: [drawer_id] });
-    _kuzu.deleteDrawer(drawer_id).catch(() => {});
+    _neo4jGraph.deleteDrawer(drawer_id).catch(() => {});
     return { success: true, drawer_id };
   } catch (e) {
     return { success: false, error: e.message };
@@ -407,24 +438,24 @@ async function toolDeleteDrawer({ drawer_id }) {
 
 // ── KG Tool Handlers ────────────────────────────────────────────────────────
 
-function toolKgQuery({ entity, as_of, direction = 'both' }) {
-  const kg = getKg();
-  const results = kg.queryEntity(entity, { asOf: as_of, direction });
+async function toolKgQuery({ entity, as_of, direction = 'both', palace = DEFAULT_PALACE }) {
+  const kg = getKg(palace);
+  const results = await kg.queryEntity(entity, { asOf: as_of, direction });
   return { entity, as_of: as_of || null, facts: results, count: results.length };
 }
 
-function toolKgAdd({ subject, predicate, object, valid_from, source_closet }) {
-  const kg = getKg();
-  const tripleId = kg.addTriple(subject, predicate, object, {
+async function toolKgAdd({ subject, predicate, object, valid_from, source_closet, palace = DEFAULT_PALACE }) {
+  const kg = getKg(palace);
+  const tripleId = await kg.addTriple(subject, predicate, object, {
     validFrom: valid_from,
     sourceCloset: source_closet,
   });
   return { success: true, triple_id: tripleId, fact: `${subject} → ${predicate} → ${object}` };
 }
 
-function toolKgInvalidate({ subject, predicate, object, ended }) {
-  const kg = getKg();
-  kg.invalidate(subject, predicate, object, ended);
+async function toolKgInvalidate({ subject, predicate, object, ended, palace = DEFAULT_PALACE }) {
+  const kg = getKg(palace);
+  await kg.invalidate(subject, predicate, object, ended);
   return {
     success: true,
     fact: `${subject} → ${predicate} → ${object}`,
@@ -432,22 +463,22 @@ function toolKgInvalidate({ subject, predicate, object, ended }) {
   };
 }
 
-function toolKgTimeline({ entity } = {}) {
-  const kg = getKg();
-  const results = kg.timeline(entity);
+async function toolKgTimeline({ entity, palace = DEFAULT_PALACE } = {}) {
+  const kg = getKg(palace);
+  const results = await kg.timeline(entity);
   return { entity: entity || 'all', timeline: results, count: results.length };
 }
 
-function toolKgStats() {
-  const kg = getKg();
-  return kg.stats();
+async function toolKgStats({ palace = DEFAULT_PALACE } = {}) {
+  const kg = getKg(palace);
+  return await kg.stats();
 }
 
 // ── Navigation Tool Handlers ────────────────────────────────────────────────
 
 async function toolTraverse({ start_room, max_hops = 2 }) {
   try {
-    const results = await _kuzu.traverse(start_room, max_hops);
+    const results = await _neo4jGraph.traverse(start_room, max_hops);
     return { start_room, max_hops, connected: results, total: results.length };
   } catch (e) {
     return { error: e.message };
@@ -456,7 +487,7 @@ async function toolTraverse({ start_room, max_hops = 2 }) {
 
 async function toolFindTunnels({ palace_a, palace_b } = {}) {
   try {
-    const tunnels = await _kuzu.findTunnels(palace_a || null, palace_b || null);
+    const tunnels = await _neo4jGraph.findTunnels(palace_a || null, palace_b || null);
     return { tunnels, total: tunnels.length };
   } catch (e) {
     return { error: e.message };
@@ -465,7 +496,7 @@ async function toolFindTunnels({ palace_a, palace_b } = {}) {
 
 async function toolGraphStats() {
   try {
-    return await _kuzu.graphStats();
+    return await _neo4jGraph.graphStats();
   } catch (e) {
     return { error: e.message };
   }
@@ -473,8 +504,8 @@ async function toolGraphStats() {
 
 // ── Diary Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general' }) {
-  const store = await getStore();
+async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general', palace = DEFAULT_PALACE }) {
+  const store = await getStore(palace);
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
   const room = 'diary';
   const now = new Date();
@@ -515,8 +546,8 @@ async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general' }
   }
 }
 
-async function toolDiaryRead({ agent_name = 'agent', last_n = 10 }) {
-  const store = await getStore();
+async function toolDiaryRead({ agent_name = 'agent', last_n = 10, palace = DEFAULT_PALACE }) {
+  const store = await getStore(palace);
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
 
   try {
@@ -558,106 +589,24 @@ async function toolDiaryRead({ agent_name = 'agent', last_n = 10 }) {
 
 // ── Memory Stack Tool Handlers ────────────────────────────────────────────────
 
-const IDENTITY_PATH  = process.env.PALACE_IDENTITY_PATH || '/root/.mempalace/identity.txt';
-const IDENTITY_DIR   = process.env.PALACE_IDENTITY_DIR  || '/root/.mempalace/identities';
 const L1_MAX_DRAWERS = 15;
 const L1_MAX_CHARS   = 3200;
 
-// ── Identity Helpers ──────────────────────────────────────────────────────────
-
-function _parseIdentityFile(filePath) {
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  const FENCE = /^---\s*$/m;
-  const parts = raw.split(FENCE);
-
-  let meta = { name: null, description: null, keywords: [], wing_focus: null, palace: null };
-  let body = raw.trim();
-
-  // Expect: ['', frontmatter, body] when file starts with ---
-  if (parts.length >= 3 && raw.trimStart().startsWith('---')) {
-    try {
-      const parsed = yaml.load(parts[1]) || {};
-      meta.name        = parsed.name        || null;
-      meta.description = parsed.description || null;
-      meta.keywords    = Array.isArray(parsed.keywords) ? parsed.keywords.map(String) : [];
-      meta.wing_focus  = parsed.wing_focus  || null;
-      meta.palace      = parsed.palace      || null;
-      meta.scope       = parsed.scope       || null;
-      body = parts.slice(2).join('---').trim();
-    } catch {
-      // malformed frontmatter — treat whole file as body
-    }
-  }
-
-  if (!meta.name) {
-    meta.name = path.basename(filePath, '.txt');
-  }
-
-  return { ...meta, scope: meta.scope || null, body, file: filePath };
+async function _loadPalaces() {
+  return _palaceStore.getAll();
 }
 
-function _loadIdentities() {
-  // Prefer identities/ directory
-  if (fs.existsSync(IDENTITY_DIR)) {
-    try {
-      const files = fs.readdirSync(IDENTITY_DIR).filter(f => f.endsWith('.txt')).sort();
-      return files.map(f => _parseIdentityFile(path.join(IDENTITY_DIR, f)));
-    } catch {
-      // fall through to single-file fallback
-    }
-  }
-  // Backward compat: single identity.txt
-  if (fs.existsSync(IDENTITY_PATH)) {
-    return [_parseIdentityFile(IDENTITY_PATH)];
-  }
-  return [];
-}
-
-
-// _loadPalaces: reads from registry, migrates from txt files on first run.
-// Also triggers async background embedding for any palace missing scope_vector.
-function _loadPalaces() {
-  let palaces = _registry.getAll();
-  if (palaces.length === 0) {
-    // Backward compat: migrate from identities/*.txt
-    const txtIdentities = _loadIdentities();
-    for (const id of txtIdentities) {
-      _registry.upsert({
-        name:        id.palace || DEFAULT_PALACE,
-        description: id.description || null,
-        keywords:    id.keywords || [],
-        scope:       id.scope || null,
-        wing_focus:  id.wing_focus || null,
-        l0_body:     id.body || null,
-        is_default:  id.name === 'default' ? 1 : 0,
-      });
-    }
-    palaces = _registry.getAll();
-  }
-
-  // Background: embed scope for any palace that is missing scope_vector
-  for (const p of palaces) {
-    if (p.scope && !p.scope_vector) {
-      new Embedder().embed(p.scope)
-        .then(v => _registry.setVector(p.name, v))
-        .catch(() => {});
-    }
-  }
-
-  return palaces;
-}
-
-async function toolWakeUp({ wing, context } = {}) {
+export async function illuminateMemory({ wing, context } = {}) {
   // L0 — auto-select identity
   let l0 = '';
   let identitySelected = null;
 
   try {
-    const palaces = _loadPalaces();
+    const palaces = await _loadPalaces();
     let selectedName;
     if (context) {
-      const ctxVector = await new Embedder().embed(context);
-      selectedName = selectPalace(ctxVector, palaces).name;
+      const match = await _palaceStore.selectByContext(context);
+      selectedName = match?.name || (palaces.find(p => p.is_default) || palaces[0])?.name || DEFAULT_PALACE;
     } else {
       selectedName = (palaces.find(p => p.is_default) || palaces[0])?.name || DEFAULT_PALACE;
     }
@@ -666,15 +615,11 @@ async function toolWakeUp({ wing, context } = {}) {
     if (selected) {
       l0 = selected.l0_body || `## L0 — IDENTITY\n(${selected.name} — no body content)`;
 
-      // Activate the selected palace
-      _activePalace = selected.name;
-      _activeKgPath = path.join(PALACE_BASE, `kg_${selected.name}.sqlite3`);
-
       identitySelected = {
         name: selected.name,
         description: selected.description || null,
         wing_focus: selected.wing_focus || null,
-        palace: _activePalace,
+        palace: selected.name,
         reason: selected.is_default ? 'default fallback' : 'scope/keyword match',
       };
     } else {
@@ -688,9 +633,10 @@ async function toolWakeUp({ wing, context } = {}) {
   const l1Wing = wing || (identitySelected && identitySelected.wing_focus) || null;
 
   // L1 — essential story: top drawers by importance
+  const activePalace = identitySelected?.palace || DEFAULT_PALACE;
   let l1 = '';
   try {
-    const store = await getStore();
+    const store = await getStore(activePalace);
     const opts = { limit: 10000 };
     if (l1Wing) opts.where = { wing: l1Wing };
     const all = await store.get(opts);
@@ -750,8 +696,8 @@ async function toolWakeUp({ wing, context } = {}) {
   };
 }
 
-async function toolRecall({ wing, room, limit = 10 } = {}) {
-  const store = await getStore();
+async function toolRecall({ wing, room, limit = 10, palace = DEFAULT_PALACE } = {}) {
+  const store = await getStore(palace);
 
   let where;
   if (wing && room) where = { $and: [{ wing }, { room }] };
@@ -792,8 +738,8 @@ async function toolRecall({ wing, room, limit = 10 } = {}) {
   }
 }
 
-function toolListIdentities() {
-  const palaces = _loadPalaces();
+async function toolListIdentities() {
+  const palaces = await _loadPalaces();
   if (palaces.length === 0) {
     return {
       palaces: [],
@@ -819,27 +765,13 @@ async function toolPalaceCreate({ name, description, keywords = [], scope, wing_
   }
   const palaceName = name.trim().toLowerCase().replace(/\s+/g, '_');
 
-  _registry.upsert({ name: palaceName, description, keywords, scope, wing_focus, l0_body, is_default: 0 });
+  await _palaceStore.upsert({ name: palaceName, description, keywords, scope, wing_focus, l0_body, is_default: false });
 
-  // Embed scope vector for routing
-  if (scope) {
-    new Embedder().embed(scope)
-      .then(v => _registry.setVector(palaceName, v))
-      .catch(() => {});
-  }
-
-  // Register in Kuzu graph
-  _kuzu.mergePalace({ name: palaceName, description: description || '', scope: scope || '', is_default: false })
+  _neo4jGraph.mergePalace({ name: palaceName, description: description || '', scope: scope || '', is_default: false })
     .catch(() => {});
 
   // Pre-init Qdrant collection so it's ready to use
-  const prev = _activePalace;
-  _activePalace = palaceName;
-  try {
-    await getStore();
-  } finally {
-    _activePalace = prev;
-  }
+  await getStore(palaceName);
 
   return {
     success: true,
@@ -855,10 +787,7 @@ async function toolSetup({ name, about, preferences = [], rules = [], language =
 
   // Force re-init: delete cached store so init() runs fresh (handles DB wipe recovery)
   delete _stores[DEFAULT_PALACE];
-  _activePalace = DEFAULT_PALACE;
-  _activeKgPath = DEFAULT_KG_PATH;
-
-  const store = await getStore(); // creates collection if missing
+  const store = await getStore(DEFAULT_PALACE); // creates collection if missing
   const results = [];
 
   // Helper: add a drawer to personality_memory_palace
@@ -908,23 +837,17 @@ async function toolSetup({ name, about, preferences = [], rules = [], language =
   ].filter(Boolean).join('\n');
 
   const defaultScope = 'Personal preferences, user identity, communication style, rules for the AI, life events, emotions, general notes.';
-  _registry.upsert({
-    name: DEFAULT_PALACE,
+  await _palaceStore.upsert({
+    name:        DEFAULT_PALACE,
     description: `${name}'s personal assistant`,
-    keywords: [],
-    scope: defaultScope,
-    wing_focus: null,
-    l0_body: l0Body,
-    is_default: 1,
+    keywords:    [],
+    scope:       defaultScope,
+    wing_focus:  null,
+    l0_body:     l0Body,
+    is_default:  true,
   });
 
-  // Embed scope vector for routing
-  new Embedder().embed(defaultScope)
-    .then(v => _registry.setVector(DEFAULT_PALACE, v))
-    .catch(() => {});
-
-  // Register in Kuzu graph
-  _kuzu.mergePalace({ name: DEFAULT_PALACE, description: `${name}'s personal assistant`, scope: defaultScope, is_default: true })
+  _neo4jGraph.mergePalace({ name: DEFAULT_PALACE, description: `${name}'s personal assistant`, scope: defaultScope, is_default: true })
     .catch(() => {});
 
   return {
@@ -985,17 +908,21 @@ const TOOLS = [
   {
     name: 'mempalace_save',
     description:
-      'Save content to the palace. Auto-detects wing, room, hall, and importance — no need to specify them. ' +
-      'Deduplicates automatically. Pass context for better routing accuracy. ' +
-      'Returns where the content was filed and confidence level.',
+      'Save content to a specific palace. You must provide palace and the categorization (wing, hall, room, closet). ' +
+      'Call mempalace_get_taxonomy first to see the existing hierarchy and decide where this belongs. ' +
+      'Deduplicates automatically and runs knowledge graph extraction/writeback on every successful save.',
     inputSchema: {
       type: 'object',
       properties: {
-        content: { type: 'string', description: 'Content to save — verbatim, never summarized' },
-        context: { type: 'string', description: 'What this is about — improves routing accuracy (optional)' },
-        added_by: { type: 'string', description: 'Who is saving this (default: mcp)' },
+        palace:  { type: 'string',  description: 'Target palace name, required (e.g. "news_palace")' },
+        content: { type: 'string',  description: 'Content to save — verbatim, never summarized' },
+        wing:    { type: 'string',  description: 'Broad domain (e.g. "Technology", "Health", "Personal")' },
+        hall:    { type: 'string',  description: 'Sub-domain (e.g. "Programming", "Nutrition")' },
+        room:    { type: 'string',  description: 'Specific topic (e.g. "JavaScript", "Vitamins")' },
+        closet:  { type: 'string',  description: 'Fine-grained sub-topic (e.g. "TypeScript", "Vitamin D")' },
+        added_by:{ type: 'string',  description: 'Who is saving this (default: mcp)' },
       },
-      required: ['content'],
+      required: ['palace', 'content', 'wing', 'hall', 'room', 'closet'],
     },
     handler: toolSave,
   },
@@ -1132,7 +1059,7 @@ const TOOLS = [
     handler: toolDiaryRead,
   },
   {
-    name: 'mempalace_wake_up',
+    name: 'mempalace_illuminate',
     description:
       'Load L0 identity + L1 essential story. Call this at the start of every session to restore context. ' +
       'Pass context (first user message or topic) to auto-select the right agent identity. ' +
@@ -1145,7 +1072,7 @@ const TOOLS = [
         wing: { type: 'string', description: 'Override L1 wing filter — ignores identity wing_focus (optional)' },
       },
     },
-    handler: toolWakeUp,
+    handler: illuminateMemory,
   },
   {
     name: 'mempalace_recall',
@@ -1165,9 +1092,9 @@ const TOOLS = [
   {
     name: 'mempalace_list_identities',
     description:
-      'List all available agent identities from the identities/ directory. ' +
+      'List all configured palaces from the registry. ' +
       'Shows name, description, keywords, and wing_focus for each. ' +
-      'Use this to see which identities are available before calling mempalace_wake_up.',
+      'Use this to see which palaces are available before calling mempalace_illuminate.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -1179,7 +1106,7 @@ const TOOLS = [
     description:
       'First-time setup wizard. Stores user name, about, preferences, and hard rules into ' +
       'personality_memory_palace — the fallback palace used when no specific identity matches. ' +
-      'Also creates/overwrites the default identity file. Run once to personalise the palace.',
+      'Stores config in the palace registry (Qdrant). Run once to personalise the palace.',
     inputSchema: {
       type: 'object',
       properties: {

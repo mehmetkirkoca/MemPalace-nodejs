@@ -11,6 +11,10 @@ mempal.yaml
 
 # Benchmark results (generated on each run)
 benchmarks/results_*
+benchmarks/results/
+
+# Benchmark datasets (large files, downloaded locally)
+data/longmemeval*
 
 # OS files
 .DS_Store

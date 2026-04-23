@@ -18,17 +18,16 @@ export class SearchError extends Error {
  * Build a where-filter from wing/room options.
  * Exported for unit testing.
  */
-export function buildWhereFilter({ wing, room } = {}) {
-  if (wing && room) {
-    return { $and: [{ wing }, { room }] };
-  }
-  if (wing) {
-    return { wing };
-  }
-  if (room) {
-    return { room };
-  }
-  return {};
+export function buildWhereFilter({ wing, room, hall, closet } = {}) {
+  const conditions = [];
+  if (wing)   conditions.push({ wing });
+  if (hall)   conditions.push({ hall });
+  if (room)   conditions.push({ room });
+  if (closet) conditions.push({ closet });
+
+  if (conditions.length === 0) return {};
+  if (conditions.length === 1) return conditions[0];
+  return { $and: conditions };
 }
 
 /**
@@ -110,13 +109,10 @@ export async function search(query, store, { wing, room, nResults = 5 } = {}) {
  * @param {number} [options.nResults=5] - Max results
  * @returns {Promise<Object>} Search results or error object
  */
-export async function searchMemories(query, store, { wing, room, nResults = 5 } = {}) {
-  const where = buildWhereFilter({ wing, room });
+export async function searchMemories(query, store, { wing, room, hall, closet, nResults = 5 } = {}) {
+  const where = buildWhereFilter({ wing, room, hall, closet });
 
-  const kwargs = {
-    queryTexts: [query],
-    nResults,
-  };
+  const kwargs = { queryTexts: [query], nResults };
   if (Object.keys(where).length > 0) {
     kwargs.where = where;
   }
@@ -133,16 +129,22 @@ export async function searchMemories(query, store, { wing, room, nResults = 5 } 
   const dists = results.distances[0];
 
   const hits = docs.map((doc, i) => ({
-    text: doc,
-    wing: metas[i].wing || 'unknown',
-    room: metas[i].room || 'unknown',
-    source_file: path.basename(metas[i].source_file || '?'),
-    similarity: Math.round((1 - dists[i]) * 1000) / 1000,
+    text:         doc,
+    wing:         metas[i].wing        || null,
+    wing_name:    metas[i].wing_name   || null,
+    hall:         metas[i].hall        || null,
+    hall_name:    metas[i].hall_name   || null,
+    room:         metas[i].room        || null,
+    room_name:    metas[i].room_name   || null,
+    closet:       metas[i].closet      || null,
+    closet_name:  metas[i].closet_name || null,
+    source_file:  path.basename(metas[i].source_file || '?'),
+    similarity:   Math.round((1 - dists[i]) * 1000) / 1000,
   }));
 
   return {
     query,
-    filters: { wing: wing || null, room: room || null },
+    filters: { wing: wing || null, hall: hall || null, room: room || null, closet: closet || null },
     results: hits,
   };
 }

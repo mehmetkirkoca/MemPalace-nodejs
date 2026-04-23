@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "mempalace": {
+      "url": "http://localhost:3100/mcp"
+    }
+  }
+}

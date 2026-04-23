@@ -2,6 +2,10 @@ import { QdrantClient } from '@qdrant/qdrant-js';
 import { createHash } from 'crypto';
 import { Embedder } from './embedder.js';
 
+// Module-level singleton: all VectorStore instances share one Embedder
+// so the ONNX model is loaded only once per process.
+const _sharedEmbedder = new Embedder();
+
 const DNS_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 function uuidV5(name) {
@@ -55,7 +59,7 @@ export class VectorStore {
     this._qdrantUrl = qdrantUrl;
     this._collectionName = collectionName;
     this._client = new QdrantClient({ url: qdrantUrl });
-    this._embedder = new Embedder();
+    this._embedder = _sharedEmbedder;
   }
 
   async init() {
@@ -222,6 +226,17 @@ export class VectorStore {
     const qdrantIds = ids.map((id) => toQdrantId(id));
     await this._client.delete(this._collectionName, {
       points: qdrantIds,
+    });
+  }
+
+  async deleteByFilter(match) {
+    // match is a flat key→value object, e.g. { name: 'my_palace' }
+    const must = Object.entries(match).map(([key, value]) => ({
+      key,
+      match: { value },
+    }));
+    await this._client.delete(this._collectionName, {
+      filter: { must },
     });
   }
 

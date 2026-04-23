@@ -3,46 +3,41 @@
  * MemPal x ConvoMem Benchmark
  * ==============================
  *
- * Evaluates MemPal's retrieval against the ConvoMem benchmark.
+ * ConvoMem data: https://huggingface.co/datasets/Salesforce/ConvoMem
  * 75,336 QA pairs across 6 evidence categories.
  *
- * For each evidence item:
- * 1. Ingest all conversations into a fresh MemPal palace (one drawer per message)
- * 2. Query with the question
- * 3. Check if any retrieved message matches the evidence messages
+ * Pipeline:
+ *   1. Download/cache ConvoMem evidence items from HuggingFace
+ *   2. Ingest ALL conversation messages via pipelineSave (one collection)
+ *   3. For each question: pipelineSearch → retrieval recall (evidence message found?)
+ *   4. Optionally feed retrieved context to Claude → answer accuracy
  *
- * Since ConvoMem has 75K items across many files, we sample a subset for benchmarking.
- * Downloads evidence files from HuggingFace on first run.
+ * Corpus structure:
+ *   item.conversations[].messages[] → { speaker, text }
+ *   item.message_evidences[]        → { speaker, text }  (ground truth)
  *
- * Modes:
- *   raw     - flat VectorStore + cosine search (baseline)
- *   system  - full MemPalace pipeline: pipelineSave + room-filtered pipelineSearch
+ * Metrics:
+ *   Retrieval Recall — any evidence message text found (substring) in top-k results?
+ *   LLM Accuracy     — substring match between LLM answer and item.answer
  *
  * Usage:
- *     node benchmarks/convomemBench.js                                # sample 100 items
- *     node benchmarks/convomemBench.js --limit 500                    # sample 500 items
- *     node benchmarks/convomemBench.js --category user_evidence       # one category only
- *     node benchmarks/convomemBench.js --mode system                  # full pipeline
- *     node benchmarks/convomemBench.js --mode system --multi-palace   # two-palace routing
+ *   node benchmarks/convomemBench.js
+ *   node benchmarks/convomemBench.js --limit 50 --no-llm
+ *   node benchmarks/convomemBench.js --category user_evidence --top-k 5 --llm-key $KEY
  */
 
 import fs from 'fs';
 import path from 'path';
-import { parseArgs } from 'util';
-import { fileURLToPath } from 'url';
-import { VectorStore } from '../src/vectorStore.js';
-import { Embedder } from '../src/embedder.js';
 import {
-  slugifyRoom,
-  selectPalace,
-  selectHall,
-  getHallVectors,
-  scoreImportance,
-} from '../src/mempalacePipeline.js';
-import { createHash } from 'crypto';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+  createBenchStore,
+  ingestCorpus,
+  searchQuestion,
+  llmAnswer,
+  substringMatch,
+  saveResults,
+  printSummary,
+  parseCommonArgs,
+} from './lib.js';
 
 // =============================================================================
 // CONSTANTS
@@ -60,66 +55,48 @@ const CATEGORIES = {
   implicit_connection_evidence: 'Implicit Connections',
 };
 
+// Known fallback file for categories where directory listing fails
 const SAMPLE_FILES = {
   user_evidence: '1_evidence/0050e213-5032-42a0-8041-b5eef2f8ab91_Telemarketer.json',
-  assistant_facts_evidence: null,
-  changing_evidence: null,
-  abstention_evidence: null,
-  preference_evidence: null,
-  implicit_connection_evidence: null,
 };
 
 // =============================================================================
-// DATA LOADING
+// DATA LOADING (HuggingFace download + local cache)
 // =============================================================================
 
-async function downloadEvidenceFile(category, subpath, cacheDir) {
-  const url = `${HF_BASE}/${category}/${subpath}`;
-  const cachePath = path.join(cacheDir, category, subpath.replace(/\//g, '_'));
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-
+async function downloadFile(url, cachePath) {
   if (fs.existsSync(cachePath)) {
     return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
   }
-
-  console.log(`    Downloading: ${category}/${subpath}...`);
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const text = await resp.text();
-    fs.writeFileSync(cachePath, text, 'utf-8');
-    return JSON.parse(text);
-  } catch (e) {
-    console.log(`    Failed to download ${url}: ${e.message}`);
-    return null;
-  }
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
+  const text = await resp.text();
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, text, 'utf-8');
+  return JSON.parse(text);
 }
 
 async function discoverFiles(category, cacheDir) {
-  const apiUrl = `https://huggingface.co/api/datasets/Salesforce/ConvoMem/tree/main/core_benchmark/evidence_questions/${category}/1_evidence`;
   const cachePath = path.join(cacheDir, `${category}_filelist.json`);
-
   if (fs.existsSync(cachePath)) {
     return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
   }
-
+  const apiUrl = `https://huggingface.co/api/datasets/Salesforce/ConvoMem/tree/main/core_benchmark/evidence_questions/${category}/1_evidence`;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const resp = await fetch(apiUrl, { signal: controller.signal });
     clearTimeout(timeout);
-
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const files = await resp.json();
     const paths = files
       .filter((f) => f.path.endsWith('.json'))
       .map((f) => f.path.split(`${category}/`)[1]);
-
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
     fs.writeFileSync(cachePath, JSON.stringify(paths), 'utf-8');
     return paths;
   } catch (e) {
-    console.log(`    Failed to list files for ${category}: ${e.message}`);
+    console.log(`  Warning: could not list files for ${category}: ${e.message}`);
     return [];
   }
 }
@@ -134,24 +111,30 @@ async function loadEvidenceItems(categories, limit, cacheDir) {
       if (known) {
         files = [known];
       } else {
-        console.log(`  Skipping ${category} -- no files found`);
+        console.log(`  Skipping ${category} — no files found`);
         continue;
       }
     }
 
-    const itemsForCat = [];
+    const catItems = [];
     for (const fpath of files) {
-      if (itemsForCat.length >= limit) break;
-      const data = await downloadEvidenceFile(category, fpath, cacheDir);
-      if (data && data.evidence_items) {
-        for (const item of data.evidence_items) {
-          item._category_key = category;
-          itemsForCat.push(item);
+      if (catItems.length >= limit) break;
+      const url = `${HF_BASE}/${category}/${fpath}`;
+      const cachePath = path.join(cacheDir, category, fpath.replace(/\//g, '_'));
+      try {
+        const data = await downloadFile(url, cachePath);
+        if (data?.evidence_items) {
+          for (const item of data.evidence_items) {
+            item._category_key = category;
+            catItems.push(item);
+          }
         }
+      } catch (e) {
+        console.log(`  Download failed (${category}/${fpath}): ${e.message}`);
       }
     }
 
-    const sliced = itemsForCat.slice(0, limit);
+    const sliced = catItems.slice(0, limit);
     allItems.push(...sliced);
     console.log(`  ${CATEGORIES[category] || category}: ${sliced.length} items loaded`);
   }
@@ -160,325 +143,192 @@ async function loadEvidenceItems(categories, limit, cacheDir) {
 }
 
 // =============================================================================
-// RETRIEVAL
+// CORPUS BUILDER
 // =============================================================================
 
-const _embedder = new Embedder();
+/**
+ * Each message across all conversations in all items becomes a corpus doc.
+ * corpusId = "${itemIdx}_conv${convIdx}_msg${msgIdx}"
+ * Format: "Speaker: text"
+ */
+function buildCorpus(items) {
+  const corpusItems = [];
+  const seenContent = new Set();
 
-async function retrieveForItem(item, topK = 10, mode = 'raw', multiPalace = false) {
-  const conversations = item.conversations || [];
-  const question = item.question;
-  const evidenceMessages = item.message_evidences || [];
-  const evidenceTexts = new Set(evidenceMessages.map((e) => e.text.trim().toLowerCase()));
+  for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+    const item = items[itemIdx];
+    const conversations = item.conversations || [];
 
-  // Build corpus: one doc per message
-  const corpus = [];
-  const corpusSpeakers = [];
-  for (const conv of conversations) {
-    for (const msg of conv.messages || []) {
-      corpus.push(msg.text);
-      corpusSpeakers.push(msg.speaker);
-    }
-  }
+    for (let convIdx = 0; convIdx < conversations.length; convIdx++) {
+      const messages = conversations[convIdx].messages || [];
 
-  if (corpus.length === 0) {
-    return [0.0, { error: 'empty corpus' }];
-  }
+      for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
+        const msg = messages[msgIdx];
+        const text = (msg.text || '').trim();
+        if (!text) continue;
 
-  const collectionName = `convomem_bench_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const content = `${msg.speaker || 'Unknown'}: ${text}`;
+        if (seenContent.has(content)) continue;
+        seenContent.add(content);
 
-  if (mode === 'system') {
-    // ── System mode: pipelineSave + room-filtered pipelineSearch ──────
-    let palaces, stores;
-    if (multiPalace) {
-      const personalVec = await _embedder.embed(
-        'personal life family health emotions relationships hobbies feelings diary weekend home'
-      );
-      const generalVec = await _embedder.embed(
-        'work technical decisions projects knowledge research facts architecture code'
-      );
-      palaces = [
-        { name: 'sys_personal', scope_vector: personalVec, is_default: false },
-        { name: 'sys_general',  scope_vector: generalVec,  is_default: true  },
-      ];
-      stores = {
-        sys_personal: new VectorStore({ collectionName: `${collectionName}_personal` }),
-        sys_general:  new VectorStore({ collectionName: `${collectionName}_general` }),
-      };
-    } else {
-      palaces = [{ name: 'sys_single', scope_vector: null, is_default: true }];
-      stores = { sys_single: new VectorStore({ collectionName }) };
-    }
-
-    try {
-      for (const store of Object.values(stores)) {
-        await store.deleteCollection();
-        await store.init();
-      }
-
-      // Ingest: embed once per item, reuse vector for palace + hall + Qdrant
-      const hallVectors = await getHallVectors();
-      const docTextToIdx = new Map();
-      for (let i = 0; i < corpus.length; i++) {
-        const vec = await _embedder.embed(corpus[i]);
-        const { name: palaceName } = selectPalace(vec, palaces);
-        const hall = selectHall(vec, hallVectors);
-        const context = corpusSpeakers[i] || '';
-        const room = slugifyRoom(corpus[i] + '\n' + context);
-        const importance = scoreImportance(corpus[i], context);
-        const hash = createHash('md5')
-          .update(corpus[i].slice(0, 100) + i.toString())
-          .digest('hex')
-          .slice(0, 12);
-        const drawerId = `drawer_${room}_${hash}`;
-
-        await stores[palaceName].addWithVectors({
-          ids: [drawerId],
-          documents: [corpus[i]],
-          vectors: [vec],
-          metadatas: [{ room, hall, palace: palaceName, importance, added_by: 'benchmark' }],
-        });
-        if (!docTextToIdx.has(corpus[i])) docTextToIdx.set(corpus[i], i);
-      }
-
-      // Search: embed once, reuse for palace + Qdrant query
-      const qVec = await _embedder.embed(question);
-      const { name: qPalace } = selectPalace(qVec, palaces);
-      const estimatedRoom = slugifyRoom(question);
-      const nRes = Math.min(topK, corpus.length);
-
-      // Room-filtered search first, fall back to unfiltered
-      let rawResults = null;
-      let roomFilterUsed = false;
-      if (estimatedRoom && estimatedRoom !== 'general') {
-        const filtered = await stores[qPalace].queryWithVector({
-          queryVector: qVec,
-          nResults: nRes,
-          where: { room: estimatedRoom },
-        });
-        if (filtered.ids[0].length > 0) {
-          rawResults = filtered;
-          roomFilterUsed = true;
-        }
-      }
-      if (!rawResults) {
-        rawResults = await stores[qPalace].queryWithVector({ queryVector: qVec, nResults: nRes });
-      }
-
-      const retrievedTexts = (rawResults.documents[0] || [])
-        .map((doc) => doc.trim().toLowerCase());
-
-      let found = 0;
-      for (const evText of evidenceTexts) {
-        for (const retText of retrievedTexts) {
-          if (evText.includes(retText) || retText.includes(evText)) {
-            found++;
-            break;
-          }
-        }
-      }
-
-      const recall = evidenceTexts.size > 0 ? found / evidenceTexts.size : 1.0;
-      return [recall, { retrieved_count: retrievedTexts.length, evidence_count: evidenceTexts.size, found, room_filter_used: roomFilterUsed }];
-    } finally {
-      for (const store of Object.values(stores)) {
-        try { await store.deleteCollection(); } catch { /* ignore */ }
+        const corpusId = `item${itemIdx}_conv${convIdx}_msg${msgIdx}`;
+        corpusItems.push({ content, corpusId });
       }
     }
   }
 
-  // ── Raw mode ───────────────────────────────────────────────────────
-  const store = new VectorStore({ collectionName });
-
-  try {
-    await store.init();
-
-    await store.add({
-      documents: corpus,
-      ids: corpus.map((_, i) => `msg_${i}`),
-      metadatas: corpusSpeakers.map((s, i) => ({ speaker: s, idx: i })),
-    });
-
-    const results = await store.query({
-      queryTexts: [question],
-      nResults: Math.min(topK, corpus.length),
-    });
-
-    const retrievedIndices = results.metadatas[0].map((m) => m.idx);
-    const retrievedTexts = retrievedIndices.map((i) => corpus[i].trim().toLowerCase());
-
-    let found = 0;
-    for (const evText of evidenceTexts) {
-      for (const retText of retrievedTexts) {
-        if (evText.includes(retText) || retText.includes(evText)) {
-          found++;
-          break;
-        }
-      }
-    }
-
-    const recall = evidenceTexts.size > 0 ? found / evidenceTexts.size : 1.0;
-    return [recall, { retrieved_count: retrievedIndices.length, evidence_count: evidenceTexts.size, found }];
-  } finally {
-    await store.deleteCollection();
-  }
+  return corpusItems;
 }
 
 // =============================================================================
-// BENCHMARK RUNNER
+// SCORING
 // =============================================================================
 
-async function runBenchmark(categories, limitPerCat, topK, mode, cacheDir, outFile, multiPalace = false) {
+function recallHit(retrievedTexts, item) {
+  const evidenceTexts = (item.message_evidences || []).map((e) => (e.text || '').toLowerCase());
+  if (evidenceTexts.length === 0) return null;
+
+  return retrievedTexts.some((retrieved) => {
+    const r = retrieved.toLowerCase();
+    return evidenceTexts.some((ev) => r.includes(ev) || ev.includes(r));
+  });
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+async function run() {
+  const args = parseCommonArgs(process.argv);
+
+  // Dataset-specific args
+  let category = 'all';
+  let cacheDir = '/tmp/convomem_cache';
+  const rawArgs = process.argv.slice(2);
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i] === '--category') category = rawArgs[++i];
+    if (rawArgs[i] === '--cache-dir') cacheDir = rawArgs[++i];
+    if (rawArgs[i] === '--help' || rawArgs[i] === '-h') {
+      console.log(`Usage: node benchmarks/convomemBench.js [options]
+
+Options:
+  --category <cat>     Category or "all" (default: all)
+  --cache-dir <dir>    HuggingFace cache dir (default: /tmp/convomem_cache)
+  --top-k <n>          default 10
+  --limit <n>          items per category (default: 100)
+  --llm-key <key>      or ANTHROPIC_API_KEY env
+  --llm-model <m>      default claude-haiku-4-5-20251001
+  --out <file>         output JSONL
+  --no-llm             skip LLM evaluation`);
+      process.exit(0);
+    }
+  }
+
+  const validCategories = [...Object.keys(CATEGORIES), 'all'];
+  if (!validCategories.includes(category)) {
+    console.error(`Invalid category: ${category}. Valid: ${validCategories.join(', ')}`);
+    process.exit(1);
+  }
+
+  if (!args.noLlm && !args.llmKey) {
+    console.error('ERROR: --llm-key or ANTHROPIC_API_KEY required. Use --no-llm to skip LLM.');
+    process.exit(1);
+  }
+
+  const limit = args.limit || 100;
+  const categories = category === 'all' ? Object.keys(CATEGORIES) : [category];
+
+  const ts = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 13);
+  const catTag = category === 'all' ? 'all' : category;
+  const outFile = args.outFile || `benchmarks/results/convomem_pipeline_${catTag}_top${args.topK}_${ts}.jsonl`;
+
   console.log(`\n${'='.repeat(60)}`);
-  console.log('  MemPal x ConvoMem Benchmark');
+  console.log('  MemPal x ConvoMem — Pipeline Benchmark');
   console.log(`${'='.repeat(60)}`);
   console.log(`  Categories:  ${categories.length}`);
-  console.log(`  Limit/cat:   ${limitPerCat}`);
-  console.log(`  Top-k:       ${topK}`);
-  console.log(`  Mode:        ${mode}${mode === 'system' && multiPalace ? ' (multi-palace)' : ''}`);
+  console.log(`  Limit/cat:   ${limit}`);
+  console.log(`  Top-k:       ${args.topK}`);
+  console.log(`  LLM:         ${args.noLlm ? 'disabled' : args.llmModel}`);
   console.log(`${'─'.repeat(60)}`);
   console.log('\n  Loading data from HuggingFace...\n');
 
-  const items = await loadEvidenceItems(categories, limitPerCat, cacheDir);
-
+  const items = await loadEvidenceItems(categories, limit, cacheDir);
+  if (!items.length) {
+    console.error('No items loaded. Check network/cache.');
+    process.exit(1);
+  }
   console.log(`\n  Total items: ${items.length}`);
-  console.log(`${'─'.repeat(60)}\n`);
 
-  const allRecall = [];
-  const perCategory = {};
-  const resultsLog = [];
-  const startTime = Date.now();
+  const corpusItems = buildCorpus(items);
+  console.log(`  Corpus size: ${corpusItems.length} unique messages\n`);
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const question = item.question;
-    const answer = item.answer || '';
-    const catKey = item._category_key || 'unknown';
-
-    const [recall, details] = await retrieveForItem(item, topK, mode, multiPalace);
-    allRecall.push(recall);
-
-    if (!perCategory[catKey]) perCategory[catKey] = [];
-    perCategory[catKey].push(recall);
-
-    resultsLog.push({
-      question,
-      answer,
-      category: catKey,
-      recall,
-      details,
+  const { store } = await createBenchStore('convomem');
+  try {
+    console.log(`  Ingesting via pipelineSave...`);
+    const textToId = await ingestCorpus(corpusItems, store, 'convomem', {
+      onProgress: ({ ingested, skipped, total }) => {
+        process.stdout.write(`\r    ${ingested}/${total} ingested  ${skipped} skipped  `);
+      },
     });
+    console.log(`\n  Ingestion complete. Unique stored: ${textToId.size}\n`);
+    console.log(`${'─'.repeat(60)}`);
 
-    const status = recall >= 1.0 ? 'HIT' : recall > 0 ? 'part' : 'miss';
-    if ((i + 1) % 20 === 0 || i === items.length - 1) {
-      const avgSoFar = allRecall.reduce((a, b) => a + b, 0) / allRecall.length;
-      console.log(
-        `  [${String(i + 1).padStart(4)}/${items.length}] avg_recall=${avgSoFar.toFixed(3)}  last=${status}`
-      );
+    const log = [];
+    const startTime = Date.now();
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+
+      const searchResult = await searchQuestion(item.question, store, args.topK);
+      const retrievedTexts = (searchResult.results || []).map((r) => r.text);
+
+      const hit = recallHit(retrievedTexts, item);
+
+      let llmAns = null;
+      let llmScore = null;
+      if (!args.noLlm) {
+        llmAns = await llmAnswer(item.question, retrievedTexts.slice(0, args.topK), args.llmKey, args.llmModel);
+        if (llmAns !== null && item.answer) {
+          llmScore = substringMatch(llmAns, item.answer) ? 1.0 : 0.0;
+        }
+      }
+
+      log.push({
+        category: item._category_key,
+        category_name: CATEGORIES[item._category_key] || item._category_key,
+        question: item.question,
+        answer: item.answer,
+        evidence_count: item.message_evidences?.length || 0,
+        recall_hit: hit,
+        room_filter_used: searchResult.room_filter_used ?? false,
+        llm_answer: llmAns,
+        llm_score: llmScore,
+      });
+
+      const status = hit === null ? 'skip' : hit ? 'HIT ' : 'miss';
+      if ((i + 1) % 20 === 0 || i === items.length - 1) {
+        const recallItems = log.filter((r) => r.recall_hit !== null);
+        const recallPct = recallItems.length
+          ? (recallItems.filter((r) => r.recall_hit).length / recallItems.length * 100).toFixed(1)
+          : '—';
+        console.log(
+          `  [${String(i + 1).padStart(4)}/${items.length}]  ${status}  recall=${recallPct}%`
+        );
+      }
     }
-  }
 
-  const elapsed = (Date.now() - startTime) / 1000;
-  const avgRecall = allRecall.length > 0 ? allRecall.reduce((a, b) => a + b, 0) / allRecall.length : 0;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\n  Done in ${elapsed}s`);
 
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`  RESULTS -- MemPal (${mode} mode, top-${topK})`);
-  console.log(`${'='.repeat(60)}`);
-  console.log(
-    `  Time:        ${elapsed.toFixed(1)}s (${(elapsed / Math.max(items.length, 1)).toFixed(2)}s per item)`
-  );
-  console.log(`  Items:       ${items.length}`);
-  console.log(`  Avg Recall:  ${avgRecall.toFixed(3)}`);
-
-  console.log('\n  PER-CATEGORY RECALL:');
-  for (const catKey of Object.keys(perCategory).sort()) {
-    const vals = perCategory[catKey];
-    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-    const name = CATEGORIES[catKey] || catKey;
-    const perfect = vals.filter((v) => v >= 1.0).length;
-    console.log(`    ${name.padEnd(25)} R=${avg.toFixed(3)}  perfect=${perfect}/${vals.length}`);
-  }
-
-  const perfectTotal = allRecall.filter((r) => r >= 1.0).length;
-  const zeroTotal = allRecall.filter((r) => r === 0).length;
-  console.log('\n  DISTRIBUTION:');
-  console.log(
-    `    Perfect (1.0):  ${String(perfectTotal).padStart(4)} (${((perfectTotal / allRecall.length) * 100).toFixed(1)}%)`
-  );
-  console.log(
-    `    Zero (0.0):     ${String(zeroTotal).padStart(4)} (${((zeroTotal / allRecall.length) * 100).toFixed(1)}%)`
-  );
-
-  console.log(`\n${'='.repeat(60)}\n`);
-
-  if (outFile) {
-    fs.mkdirSync(path.dirname(outFile), { recursive: true });
-    fs.writeFileSync(outFile, JSON.stringify(resultsLog, null, 2), 'utf-8');
-    console.log(`  Results saved to: ${outFile}`);
+    printSummary(log, 'category_name', 'ConvoMem Pipeline Results');
+    fs.mkdirSync('benchmarks/results', { recursive: true });
+    saveResults(outFile, log);
+  } finally {
+    console.log(`\n  Collection: ${store._collectionName} (persists in Qdrant)`);
   }
 }
 
-// =============================================================================
-// CLI
-// =============================================================================
-
-const categoryChoices = [...Object.keys(CATEGORIES), 'all'];
-
-const { values: args } = parseArgs({
-  options: {
-    limit: { type: 'string', default: '100' },
-    'top-k': { type: 'string', default: '10' },
-    category: { type: 'string', default: 'all' },
-    mode: { type: 'string', default: 'raw' },
-    'cache-dir': { type: 'string', default: '/tmp/convomem_cache' },
-    out: { type: 'string', default: '' },
-    'multi-palace': { type: 'boolean', default: false },
-    help: { type: 'boolean', short: 'h', default: false },
-  },
-});
-
-if (args.help) {
-  console.log(`Usage: node benchmarks/convomemBench.js [options]
-
-Options:
-  --limit <n>          Items per category (default: 100)
-  --top-k <n>          Top-k retrieval (default: 10)
-  --category <cat>     Category or "all" (default: all)
-  --mode <mode>        raw | system (default: raw)
-  --cache-dir <dir>    HuggingFace cache directory (default: /tmp/convomem_cache)
-  --out <file>         Output JSON file path
-  --multi-palace       (system mode) split into personal/general palaces
-  -h, --help           Show this help`);
-  process.exit(0);
-}
-
-const limit = parseInt(args.limit, 10);
-const topK = parseInt(args['top-k'], 10);
-const mode = args.mode;
-const cacheDir = args['cache-dir'];
-const multiPalace = args['multi-palace'];
-
-const validModes = ['raw', 'system'];
-if (!validModes.includes(mode)) {
-  console.error(`Invalid mode: ${mode}. Valid: ${validModes.join(', ')}`);
-  process.exit(1);
-}
-
-if (!categoryChoices.includes(args.category)) {
-  console.error(`Invalid category: ${args.category}. Must be one of: ${categoryChoices.join(', ')}`);
-  process.exit(1);
-}
-
-const categories =
-  args.category === 'all' ? Object.keys(CATEGORIES) : [args.category];
-
-const now = new Date();
-const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-
-const outFile =
-  args.out || `benchmarks/results_convomem_${mode}_top${topK}_${timestamp}.json`;
-
-runBenchmark(categories, limit, topK, mode, cacheDir, outFile, multiPalace).catch((err) => {
+run().catch((err) => {
   console.error('Benchmark failed:', err);
   process.exit(1);
 });

@@ -19,7 +19,7 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_graph_stats',
   'mempalace_diary_write',
   'mempalace_diary_read',
-  'mempalace_wake_up',
+  'mempalace_illuminate',
   'mempalace_recall',
   'mempalace_list_identities',
   'mempalace_setup',
@@ -75,7 +75,8 @@ describe('TOOLS internal', () => {
     // search: query required
     expect(toolMap.mempalace_search.inputSchema.required).toContain('query');
 
-    // save: content required, context optional
+    // save: palace and content required, context optional
+    expect(toolMap.mempalace_save.inputSchema.required).toContain('palace');
     expect(toolMap.mempalace_save.inputSchema.required).toContain('content');
     expect(toolMap.mempalace_save.inputSchema.required).not.toContain('context');
 
@@ -101,10 +102,10 @@ describe('TOOLS internal', () => {
     // diary_read: agent_name required
     expect(toolMap.mempalace_diary_read.inputSchema.required).toContain('agent_name');
 
-    // wake_up: all optional, has context param
-    expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('wing');
-    expect(toolMap.mempalace_wake_up.inputSchema.required ?? []).not.toContain('context');
-    expect(toolMap.mempalace_wake_up.inputSchema.properties).toHaveProperty('context');
+    // illuminate: all optional, has context param
+    expect(toolMap.mempalace_illuminate.inputSchema.required ?? []).not.toContain('wing');
+    expect(toolMap.mempalace_illuminate.inputSchema.required ?? []).not.toContain('context');
+    expect(toolMap.mempalace_illuminate.inputSchema.properties).toHaveProperty('context');
 
     // recall: all optional
     expect(toolMap.mempalace_recall.inputSchema.required ?? []).not.toContain('wing');
@@ -123,11 +124,28 @@ describe('TOOLS internal', () => {
     expect(toolMap.mempalace_palace_create.inputSchema.required).not.toContain('scope');
     expect(toolMap.mempalace_palace_create.inputSchema.required).not.toContain('keywords');
   });
+
+  it('save handler rejects missing palace before writing', async () => {
+    const save = TOOLS.find((t) => t.name === 'mempalace_save').handler;
+    const result = await save({
+      content: 'Alice works on Project Phoenix.',
+      wing: 'Work',
+      hall: 'Projects',
+      room: 'Phoenix',
+      closet: 'Facts',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        error: 'palace is required',
+      })
+    );
+  });
 });
 
 describe('Constants', () => {
   it('PALACE_PROTOCOL is defined and non-empty', () => {
     expect(PALACE_PROTOCOL).toBeTruthy();
-    expect(PALACE_PROTOCOL).toContain('MemPalace Memory Protocol');
+    expect(PALACE_PROTOCOL).toContain('CRITICAL OPERATIONAL PROTOCOL');
   });
 });
