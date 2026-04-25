@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { getToolDefinitions, TOOLS, PALACE_PROTOCOL } from '../src/mcpServer.js';
+import {
+  getToolDefinitions,
+  TOOLS,
+  PALACE_PROTOCOL,
+  _resultQuality,
+  _shouldTryFallback,
+} from '../src/mcpServer.js';
+import { normalizeRoutingQuery } from '../src/routingMemoryStore.js';
 
 const EXPECTED_TOOL_NAMES = [
   'mempalace_status',
@@ -160,5 +167,42 @@ describe('Constants', () => {
   it('PALACE_PROTOCOL is defined and non-empty', () => {
     expect(PALACE_PROTOCOL).toBeTruthy();
     expect(PALACE_PROTOCOL).toContain('CRITICAL OPERATIONAL PROTOCOL');
+  });
+});
+
+describe('routing fallback helpers', () => {
+  it('normalizes routing queries for exact cache matching', () => {
+    expect(normalizeRoutingQuery(' Laravel?  ')).toBe('laravel');
+    expect(normalizeRoutingQuery('PHP-framework')).toBe('php framework');
+  });
+
+  it('scores result quality from semantic similarity', () => {
+    expect(_resultQuality('laravel framework', {
+      results: [
+        { similarity: 0.36 },
+        { similarity: 0.309 },
+        { similarity: 0.973 },
+      ],
+    })).toEqual(expect.objectContaining({
+      best_similarity: 0.36,
+      avg_top_3_similarity: expect.any(Number),
+      answer_coverage: expect.any(Number),
+      score: expect.any(Number),
+    }));
+  });
+
+  it('suggests fallback when semantic quality is weak', () => {
+    const primaryResult = {
+      results: [
+        { similarity: 0.11 },
+        { similarity: 0.09 },
+      ],
+    };
+    const routingCandidates = [
+      { name: 'personality_memory_palace', score: 0.1458 },
+      { name: 'news_palace', score: 0.0870 },
+    ];
+
+    expect(_shouldTryFallback('yamaç paraşütü kazası', primaryResult, routingCandidates)).toBe(true);
   });
 });

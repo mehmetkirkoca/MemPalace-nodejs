@@ -211,14 +211,14 @@ export class GitignoreMatcher {
 
 const _matcherCache = new Map();
 
-export function loadGitignoreMatcher(dirPath) {
+function loadGitignoreMatcher(dirPath) {
   if (!_matcherCache.has(dirPath)) {
     _matcherCache.set(dirPath, GitignoreMatcher.fromDir(dirPath));
   }
   return _matcherCache.get(dirPath);
 }
 
-export function clearMatcherCache() {
+function clearMatcherCache() {
   _matcherCache.clear();
 }
 

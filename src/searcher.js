@@ -77,7 +77,7 @@ export async function search(query, store, { wing, room, nResults = 5 } = {}) {
   docs.forEach((doc, i) => {
     const meta = metas[i];
     const dist = dists[i];
-    const similarity = Math.round((1 - dist) * 1000) / 1000;
+    const similarity = Math.round(dist * 1000) / 1000;
     const source = path.basename(meta.source_file || '?');
     const wingName = meta.wing || '?';
     const roomName = meta.room || '?';
@@ -139,7 +139,7 @@ export async function searchMemories(query, store, { wing, room, hall, closet, n
     closet:       metas[i].closet      || null,
     closet_name:  metas[i].closet_name || null,
     source_file:  path.basename(metas[i].source_file || '?'),
-    similarity:   Math.round((1 - dists[i]) * 1000) / 1000,
+    similarity:   Math.round(dists[i] * 1000) / 1000,
   }));
 
   return {

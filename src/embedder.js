@@ -5,7 +5,7 @@ import { pipeline } from '@huggingface/transformers';
 const ONNX_THREADS = parseInt(process.env.ONNX_THREADS || '2', 10);
 
 export class Embedder {
-  constructor(modelName = 'Xenova/all-MiniLM-L6-v2') {
+  constructor(modelName = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2') {
     this._modelName = modelName;
     this._pipe = null;
     // Serialization queue: ensures only one inference runs at a time

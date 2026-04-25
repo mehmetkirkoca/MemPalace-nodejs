@@ -60,10 +60,13 @@ import { Neo4jGraph } from './neo4jGraph.js';
 import { Neo4jClusterStore } from './neo4jClusterStore.js';
 import { extractKgFacts } from './kgRelationExtractor.js';
 import { writeExtractedKgFacts } from './kgWriteback.js';
+import { RoutingMemoryStore } from './routingMemoryStore.js';
+import { normalizeText } from './textUtils.js';
 import { SleepConsolidator, buildRoutingContext } from './sleepConsolidator.js';
 import { VERSION } from './version.js';
 
 const _palaceStore = new PalaceStore();
+const _routingMemory = new RoutingMemoryStore();
 const _neo4jGraph  = new Neo4jGraph();
 const _sleepConsolidator = new SleepConsolidator({ palaceStore: _palaceStore, graph: _neo4jGraph });
 
@@ -83,6 +86,7 @@ Failure to follow this protocol results in memory fragmentation and loss of agen
 // ── Lazy singletons ──────────────────────────────────────────────────────────
 
 const DEFAULT_PALACE = 'personality_memory_palace';
+const MIN_ROUTING_MEMORY_QUALITY = 0.05;
 
 // Per-palace caches
 const _stores = {};
@@ -197,17 +201,234 @@ async function toolGetTaxonomy({ palace = DEFAULT_PALACE } = {}) {
 
 async function toolSearch({ query, limit = 5, wing, room, palace }) {
   let activePalace = palace;
+  let routingCandidates = [];
+  let routingScore = null;
+  let fallbackUsed = false;
+  let fallbackChecked = false;
+  let fallbackReason = null;
+  let routingMemoryHit = null;
+  let routingMemoryRefreshed = false;
+  let palacesEvaluated = activePalace ? [activePalace] : [];
 
   // If no palace specified, try to semantically route based on the query
+  let _routingLimit = 1;
   if (!activePalace) {
-    const matched = await _palaceStore.selectByContext(query);
-    activePalace = matched?.name || DEFAULT_PALACE;
+    const allPalaces = await _palaceStore.getAll();
+    _routingLimit = Math.max(allPalaces.length, 1);
+    const cachedRoute = await _routingMemory.getExact(query);
+    if (cachedRoute?.palace) {
+      // Cache hit: skip rankByContext — candidates loaded lazily below if results are weak
+      activePalace = cachedRoute.palace;
+      routingMemoryHit = cachedRoute;
+      palacesEvaluated = [activePalace];
+    } else {
+      routingCandidates = await _palaceStore.rankByContext(query, _routingLimit);
+      const matched = routingCandidates[0] || null;
+      activePalace = matched?.name || DEFAULT_PALACE;
+      routingScore = matched?.score ?? null;
+      palacesEvaluated = [activePalace];
+    }
   }
 
-  const store = await getStore(activePalace);
-  const result = await searchMemories(query, store, { wing, room, nResults: limit });
-  return { ...result, searched_palace: activePalace };
+  let result = await _searchPalace(query, activePalace, { wing, room, limit });
+
+  // Cache-hit path: lazily rank palaces only when results are weak enough to warrant fallback
+  if (!palace && routingMemoryHit && !routingCandidates.length) {
+    const primaryQuality = _resultQuality(query, result);
+    if (primaryQuality.score < 0.05 || primaryQuality.answer_coverage < 0.3) {
+      routingCandidates = _prioritizeCandidate(
+        await _palaceStore.rankByContext(query, _routingLimit),
+        activePalace,
+      );
+      const matched = routingCandidates.find((c) => c.name === activePalace) || routingCandidates[0] || null;
+      routingScore = matched?.score ?? null;
+    }
+  }
+
+  const shouldFallback = !palace && _shouldTryFallback(query, result, routingCandidates);
+  if (shouldFallback) {
+    fallbackChecked = true;
+    const fallbackOutcome = await _findBestFallback({
+      query,
+      currentPalace: activePalace,
+      currentResult: result,
+      routingCandidates,
+      palacesEvaluated,
+      wing,
+      room,
+      limit,
+    });
+
+    if (fallbackOutcome) {
+      fallbackUsed = fallbackOutcome.palace !== activePalace;
+      activePalace = fallbackOutcome.palace;
+      result = fallbackOutcome.result;
+      if (fallbackUsed) fallbackReason = 'top_results_semantically_weak';
+      routingScore = fallbackOutcome.score ?? routingScore;
+      palacesEvaluated = fallbackOutcome.palacesEvaluated;
+    }
+  }
+
+  const resultQuality = _resultQuality(query, result);
+  if (!palace && activePalace && result?.results?.length && resultQuality.score >= MIN_ROUTING_MEMORY_QUALITY) {
+    await _routingMemory.remember({
+      query,
+      palace: activePalace,
+      source: fallbackUsed ? 'fallback_success' : 'direct_hit',
+    }).catch(() => {});
+    routingMemoryRefreshed = Boolean(routingMemoryHit && routingMemoryHit.palace !== activePalace);
+  }
+  await _palaceStore.recordUsage(activePalace).catch(() => {});
+  return {
+    ...result,
+    searched_palace: activePalace,
+    routing_score: routingScore,
+    fallback_checked: fallbackChecked,
+    fallback_used: fallbackUsed,
+    fallback_reason: fallbackReason,
+    result_quality_score: resultQuality.score,
+    answer_coverage_score: resultQuality.answer_coverage,
+    palaces_evaluated: palacesEvaluated,
+    routing_memory_refreshed: routingMemoryRefreshed,
+    routing_memory_hit: routingMemoryHit ? {
+      palace: routingMemoryHit.palace,
+      hit_count: routingMemoryHit.hit_count,
+      source: routingMemoryHit.source,
+      last_used_at: routingMemoryHit.last_used_at,
+    } : null,
+    routing_candidates: routingCandidates.map((candidate) => ({
+      name: candidate.name,
+      score: candidate.score,
+      semantic_score: candidate.semantic_score,
+      field_boost: candidate.field_boost,
+      usage_boost: candidate.usage_boost,
+      usage_count: candidate.usage_count,
+    })),
+  };
 }
+
+async function _searchPalace(query, palace, { wing, room, limit }) {
+  const store = await getStore(palace);
+  return searchMemories(query, store, { wing, room, nResults: limit });
+}
+
+async function _findBestFallback({ query, currentPalace, currentResult, routingCandidates, palacesEvaluated, wing, room, limit }) {
+  let bestPalace = currentPalace;
+  let bestResult = currentResult;
+  let bestScore = routingCandidates.find((candidate) => candidate.name === currentPalace)?.score ?? null;
+  const fallbackCandidates = _sortFallbackCandidates(routingCandidates, currentPalace);
+  const evaluated = [...palacesEvaluated];
+
+  for (const candidate of fallbackCandidates) {
+    evaluated.push(candidate.name);
+    const candidateResult = await _searchPalace(query, candidate.name, { wing, room, limit });
+    if (_isFallbackBetter(query, bestResult, candidateResult)) {
+      bestPalace = candidate.name;
+      bestResult = candidateResult;
+      bestScore = candidate.score ?? bestScore;
+    }
+  }
+
+  if (bestPalace === currentPalace) {
+    return { palace: currentPalace, result: currentResult, score: bestScore, palacesEvaluated: evaluated };
+  }
+  return { palace: bestPalace, result: bestResult, score: bestScore, palacesEvaluated: evaluated };
+}
+
+export function _shouldTryFallback(query, primaryResult, routingCandidates) {
+  if (routingCandidates.length < 2) return false;
+  if (!primaryResult?.results?.length) return true;
+
+  const primaryQuality = _resultQuality(query, primaryResult);
+  return primaryQuality.score < 0.05 || primaryQuality.answer_coverage < 0.3;
+}
+
+function _isFallbackBetter(query, primaryResult, fallbackResult) {
+  if (!fallbackResult?.results?.length) return false;
+  if (!primaryResult?.results?.length) return true;
+
+  const primaryQuality = _resultQuality(query, primaryResult);
+  const fallbackQuality = _resultQuality(query, fallbackResult);
+
+  if (fallbackQuality.answer_coverage !== primaryQuality.answer_coverage) {
+    return fallbackQuality.answer_coverage > primaryQuality.answer_coverage;
+  }
+
+  return fallbackQuality.score > primaryQuality.score;
+}
+
+function _prioritizeCandidate(candidates, preferredName) {
+  const preferred = candidates.find((candidate) => candidate.name === preferredName);
+  if (!preferred) return candidates;
+  return [preferred, ...candidates.filter((candidate) => candidate.name !== preferredName)];
+}
+
+function _sortFallbackCandidates(candidates, currentPalace) {
+  return candidates
+    .filter((candidate) => candidate?.name && candidate.name !== currentPalace)
+    .sort((a, b) => (b.semantic_score ?? -Infinity) - (a.semantic_score ?? -Infinity));
+}
+
+export function _resultQuality(query, result) {
+  const hits = result?.results || [];
+  if (hits.length === 0) {
+    return {
+      best_similarity: -Infinity,
+      avg_top_3_similarity: -Infinity,
+      answer_coverage: 0,
+      score: -Infinity,
+    };
+  }
+
+  const similarities = hits
+    .slice(0, 3)
+    .map((hit) => hit?.similarity ?? -Infinity)
+    .filter((value) => Number.isFinite(value));
+
+  const bestSimilarity = hits[0]?.similarity ?? -Infinity;
+  const avgTop3Similarity = similarities.length > 0
+    ? similarities.reduce((sum, value) => sum + value, 0) / similarities.length
+    : -Infinity;
+  const answerCoverage = _answerCoverageScore(query, hits);
+
+  return {
+    best_similarity: bestSimilarity,
+    avg_top_3_similarity: avgTop3Similarity,
+    answer_coverage: answerCoverage,
+    score: Number.isFinite(avgTop3Similarity)
+      ? (bestSimilarity * 0.55) + (avgTop3Similarity * 0.25) + (answerCoverage * 0.2)
+      : bestSimilarity,
+  };
+}
+
+function _answerCoverageScore(query, hits) {
+  const aspects = _queryAspects(query);
+  if (aspects.size === 0) return 1;
+
+  const corpus = normalizeText(hits.slice(0, 5).map((hit) => hit.text).join(' '));
+  let matched = 0;
+  for (const aspect of aspects) {
+    if (corpus.includes(aspect)) matched += 1;
+  }
+  return matched / aspects.size;
+}
+
+function _queryAspects(query) {
+  const normalized = normalizeText(query);
+  if (!normalized) return new Set();
+
+  const tokens = normalized
+    .split(' ')
+    .filter(Boolean)
+    .filter((token) => token.length >= 4);
+
+  const aspects = new Set(tokens);
+  if (tokens.length > 1) {
+    aspects.add(tokens.join(' '));
+  }
+  return aspects;
+}
+
 
 async function toolCheckDuplicate({ content, threshold = 0.9, palace = DEFAULT_PALACE }) {
   const store = await getStore(palace);
@@ -830,13 +1051,15 @@ async function toolListIdentities() {
     };
   }
   return {
-    palaces: palaces.map(({ name, description, keywords, wing_focus, scope, is_default }) => ({
+    palaces: palaces.map(({ name, description, keywords, wing_focus, scope, is_default, usage_count, last_used_at }) => ({
       name,
       description: description || null,
       keywords,
       wing_focus: wing_focus || null,
       scope: scope || null,
       is_default,
+      usage_count: usage_count || 0,
+      last_used_at: last_used_at || null,
     })),
     total: palaces.length,
   };

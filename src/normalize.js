@@ -323,7 +323,7 @@ function _extractContent(content) {
  * @param {Array<{role: string, content: string}>} messages
  * @returns {string}
  */
-export function _messagesToTranscript(messages) {
+function _messagesToTranscript(messages) {
   const lines = [];
   let i = 0;
   while (i < messages.length) {
