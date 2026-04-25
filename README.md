@@ -218,7 +218,7 @@ docker compose --profile dev up
 |-----------|------|
 | **Qdrant** | Vector store — semantic search, embeddings, cosine similarity |
 | **Neo4j** | Graph DB — taxonomy, topology, tunnels, and temporal knowledge graph |
-| **all-MiniLM-L6-v2** | Local embedding model (384-dim, L2-normalized) — zero API calls |
+| **paraphrase-multilingual-MiniLM-L12-v2** | Local embedding model (384-dim, multilingual, 50+ languages) — zero API calls |
 
 ---
 
