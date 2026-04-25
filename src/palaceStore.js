@@ -79,6 +79,26 @@ export class PalaceStore {
   }
 
   /**
+   * Rank palaces by semantic similarity to a context string.
+   * Returns plain palace objects with a score field.
+   */
+  async rankByContext(contextText, limit = 5) {
+    try {
+      await this.init();
+      const result = await this._store.query({ queryTexts: [contextText], nResults: limit });
+      const docs = result.documents?.[0] || [];
+      const metas = result.metadatas?.[0] || [];
+      const scores = result.distances?.[0] || [];
+      return _deserialize(docs, metas).map((palace, index) => ({
+        ...palace,
+        score: scores[index] ?? null,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Delete a palace by name.
    */
   async delete(name) {

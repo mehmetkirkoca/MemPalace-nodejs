@@ -15,9 +15,10 @@
  *   node benchmarks/systemTest.js --scenario B
  */
 
+import crypto from 'crypto';
 import { Neo4jClusterStore } from '../src/neo4jClusterStore.js';
 import { VectorStore } from '../src/vectorStore.js';
-import { pipelineSave, pipelineSearch } from '../src/mempalacePipeline.js';
+import { searchMemories } from '../src/searcher.js';
 
 const PALACE = 'bench_system';
 
@@ -95,16 +96,14 @@ async function scenarioB() {
   console.log('=== Scenario B: Search ===\n');
   console.log('Ingesting 10 items...');
 
+  const clusters = new Neo4jClusterStore(PALACE);
   for (const item of ITEMS) {
-    await pipelineSave({
-      content:    item.content,
-      palaceName: PALACE,
-      store,
-      addedBy:    'test',
-      wing:       item.wing,
-      hall:       item.hall,
-      room:       item.room,
-      closet:     item.closet,
+    const { wingId, hallId, roomId, closetId } = await clusters.assign(item.wing, item.hall, item.room, item.closet);
+    const hash = crypto.createHash('md5').update(item.content.slice(0, 100) + Date.now()).digest('hex').slice(0, 12);
+    await store.add({
+      ids: [`dra_${hash}`],
+      documents: [item.content],
+      metadatas: [{ wing: wingId, wing_name: item.wing, hall: hallId, hall_name: item.hall, room: roomId, room_name: item.room, closet: closetId, closet_name: item.closet, palace: PALACE, added_by: 'test', filed_at: new Date().toISOString() }],
     });
     process.stdout.write('.');
   }
@@ -115,7 +114,7 @@ async function scenarioB() {
     console.log(`Query:  "${q}"`);
     console.log(`Expect: ${expect}\n`);
 
-    const result = await pipelineSearch({ query: q, store, nResults: 3 });
+    const result = await searchMemories(q, store, { nResults: 3 });
 
     for (const r of result.results || []) {
       const sim = (1 - r.similarity).toFixed(3);

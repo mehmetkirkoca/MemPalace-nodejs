@@ -3,8 +3,8 @@
 MemPalace hooks act as an "Auto-Save" feature. They help your AI keep a permanent memory without you needing to run manual commands.
 
 ### 1. What are these hooks?
-* **Save Hook** (`mempal_save_hook.sh`): Saves new facts and decisions every 15 messages.
-* **PreCompact Hook** (`mempal_precompact_hook.sh`): Saves your context right before the AI's memory window fills up.
+* **Save Hook** (`mempal_save_hook.sh`): Saves new facts and decisions every 15 messages, then asks the AI to audit and consolidate the touched palace(s).
+* **PreCompact Hook** (`mempal_precompact_hook.sh`): Saves your context right before the AI's memory window fills up, then asks the AI to audit and consolidate before compaction.
 
 ### 2. Setup for Claude Code
 Add this to your configuration file to enable automatic background saving:

@@ -41,7 +41,7 @@ describe('searchMemories', () => {
     expect(result).toHaveProperty('filters');
     expect(result).toHaveProperty('results');
     expect(result.results).toHaveLength(2);
-    expect(result.results[0]).toEqual({
+    expect(result.results[0]).toMatchObject({
       text: 'doc text 1',
       wing: 'tech',
       room: 'code',

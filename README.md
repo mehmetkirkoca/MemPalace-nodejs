@@ -99,6 +99,19 @@ New palaces are auto-registered in the palace registry on first save — no sepa
 
 Deduplication runs automatically before storing (cosine similarity ≥ 0.9 triggers a duplicate warning).
 
+### Deleting Content
+
+`mempalace_delete_drawer` no longer hard-deletes immediately. It marks the drawer for sleep-time deletion, and the actual physical delete happens during `mempalace_consolidate`.
+
+Typical flow:
+
+```js
+mempalace_delete_drawer({ drawer_id: "dra_abc123" })
+mempalace_consolidate({ palace: "personality_memory_palace", dry_run: false })
+```
+
+This keeps deletion work inside the same sleep/consolidation pipeline that already handles re-auditing and re-filing.
+
 ### Cross-Palace Tunnels
 
 The same room slug appearing in two or more palaces creates a **tunnel** — a cross-domain connection. `mempalace_find_tunnels` reveals these bridges; `mempalace_traverse` walks them.
@@ -126,7 +139,7 @@ This mirrors the Default Mode Network in the human brain — the system that con
 |----------|-------|
 | **Session** | `mempalace_illuminate`, `mempalace_recall` |
 | **Setup** | `mempalace_setup`, `mempalace_palace_create`, `mempalace_list_identities` |
-| **Storage** | `mempalace_save`, `mempalace_delete_drawer` |
+| **Storage** | `mempalace_save`, `mempalace_delete_drawer` (queues sleep-time deletion) |
 | **Search** | `mempalace_search`, `mempalace_status` |
 | **Browse** | `mempalace_list_rooms`, `mempalace_list_wings`, `mempalace_get_taxonomy` |
 | **Knowledge Graph** | `mempalace_kg_add`, `mempalace_kg_query`, `mempalace_kg_invalidate`, `mempalace_kg_timeline`, `mempalace_kg_stats` |

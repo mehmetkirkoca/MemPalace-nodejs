@@ -138,7 +138,7 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "AUTO-SAVE checkpoint. Save key topics, decisions, quotes, and code from this session to your memory system. Organize into appropriate categories. Use verbatim quotes where possible. Continue conversation after saving."
+  "reason": "AUTO-SAVE checkpoint. Save key topics, decisions, quotes, and code from this session to your memory system. Organize into appropriate categories and pass explicit palace names. Use verbatim quotes where possible. After saving, run mempalace_audit on the palace(s) you touched and apply mempalace_consolidate when it finds clear moves. Continue conversation after saving and consolidation."
 }
 HOOKJSON
 else

@@ -14,8 +14,10 @@
  */
 
 import fs from 'fs';
+import crypto from 'crypto';
 import { VectorStore } from '../src/vectorStore.js';
-import { pipelineSave, pipelineSearch } from '../src/mempalacePipeline.js';
+import { Neo4jClusterStore } from '../src/neo4jClusterStore.js';
+import { searchMemories } from '../src/searcher.js';
 
 // =============================================================================
 // VECTOR STORE
@@ -59,7 +61,9 @@ export async function ingestCorpus(items, store, palaceName, { onProgress } = {}
   let ingested = 0;
   let skipped = 0;
 
-  for (const { content, corpusId } of items) {
+  const clusters = new Neo4jClusterStore(palaceName);
+
+  for (const { content, wing, hall, room, closet, corpusId } of items) {
     if (!content || !content.trim()) {
       skipped++;
       continue;
@@ -69,7 +73,14 @@ export async function ingestCorpus(items, store, palaceName, { onProgress } = {}
       continue;
     }
 
-    await pipelineSave({ content, palaceName, store, addedBy: 'benchmark' });
+    const { wingId, hallId, roomId, closetId } = await clusters.assign(wing, hall, room, closet);
+    const hash = crypto.createHash('md5').update(content.slice(0, 100) + Date.now()).digest('hex').slice(0, 12);
+    const drawerId = `dra_${hash}`;
+    await store.add({
+      ids: [drawerId],
+      documents: [content],
+      metadatas: [{ wing: wingId, wing_name: wing, hall: hallId, hall_name: hall, room: roomId, room_name: room, closet: closetId, closet_name: closet, palace: palaceName, added_by: 'benchmark', filed_at: new Date().toISOString() }],
+    });
     textToId.set(content, corpusId);
     ingested++;
 
@@ -95,7 +106,7 @@ export async function ingestCorpus(items, store, palaceName, { onProgress } = {}
  * @returns {Promise<Object>}  pipelineSearch result
  */
 export async function searchQuestion(question, store, topK = 10) {
-  return pipelineSearch({ query: question, store, nResults: topK });
+  return searchMemories(question, store, { nResults: topK });
 }
 
 // =============================================================================

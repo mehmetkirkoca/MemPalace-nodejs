@@ -72,6 +72,6 @@ fi
 cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "COMPACTION IMMINENT. Save ALL topics, decisions, quotes, code, and important context from this session to your memory system. Be thorough — after compaction, detailed context will be lost. Organize into appropriate categories. Use verbatim quotes where possible. Save everything, then allow compaction to proceed."
+  "reason": "COMPACTION IMMINENT. Save ALL topics, decisions, quotes, code, and important context from this session to your memory system. Be thorough — after compaction, detailed context will be lost. Organize into appropriate categories, pass explicit palace names, and use verbatim quotes where possible. After saving, run mempalace_audit on the palace(s) you touched and apply mempalace_consolidate for clear moves before allowing compaction to proceed."
 }
 HOOKJSON

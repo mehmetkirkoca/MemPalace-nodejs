@@ -14,6 +14,8 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_kg_invalidate',
   'mempalace_kg_timeline',
   'mempalace_kg_stats',
+  'mempalace_audit',
+  'mempalace_consolidate',
   'mempalace_traverse',
   'mempalace_find_tunnels',
   'mempalace_graph_stats',
@@ -27,9 +29,9 @@ const EXPECTED_TOOL_NAMES = [
 ];
 
 describe('getToolDefinitions', () => {
-  it('returns 22 tool definitions', () => {
+  it('returns 24 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(22);
+    expect(tools).toHaveLength(24);
   });
 
   it('contains all expected tool names', () => {
@@ -91,6 +93,9 @@ describe('TOOLS internal', () => {
       expect.arrayContaining(['subject', 'predicate', 'object'])
     );
 
+    expect(toolMap.mempalace_audit.inputSchema.required).toContain('palace');
+    expect(toolMap.mempalace_consolidate.inputSchema.required).toContain('palace');
+
     // traverse: start_room required
     expect(toolMap.mempalace_traverse.inputSchema.required).toContain('start_room');
 
@@ -140,6 +145,14 @@ describe('TOOLS internal', () => {
         error: 'palace is required',
       })
     );
+  });
+
+  it('audit and consolidate reject missing palace', async () => {
+    const audit = TOOLS.find((t) => t.name === 'mempalace_audit').handler;
+    const consolidate = TOOLS.find((t) => t.name === 'mempalace_consolidate').handler;
+
+    await expect(audit({})).resolves.toEqual(expect.objectContaining({ error: 'palace is required' }));
+    await expect(consolidate({})).resolves.toEqual(expect.objectContaining({ error: 'palace is required' }));
   });
 });
 

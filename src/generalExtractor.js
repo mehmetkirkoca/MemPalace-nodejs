@@ -432,6 +432,3 @@ export function extractMemories(text, minConfidence = 0.3) {
 
   return memories;
 }
-
-// Named exports for testing internal functions if needed
-export { _splitIntoSegments, _scoreMarkers, _disambiguate, _extractProse };

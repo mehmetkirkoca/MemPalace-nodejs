@@ -339,4 +339,4 @@ export async function mineConvos(convoDir, wing, options = {}) {
   return results;
 }
 
-export { TOPIC_KEYWORDS, CONVO_EXTENSIONS, SKIP_DIRS, MIN_CHUNK_SIZE, scanConvos };
+export { TOPIC_KEYWORDS, CONVO_EXTENSIONS, SKIP_DIRS, MIN_CHUNK_SIZE };

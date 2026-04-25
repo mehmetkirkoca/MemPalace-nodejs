@@ -60,10 +60,12 @@ import { Neo4jGraph } from './neo4jGraph.js';
 import { Neo4jClusterStore } from './neo4jClusterStore.js';
 import { extractKgFacts } from './kgRelationExtractor.js';
 import { writeExtractedKgFacts } from './kgWriteback.js';
+import { SleepConsolidator, buildRoutingContext } from './sleepConsolidator.js';
 import { VERSION } from './version.js';
 
 const _palaceStore = new PalaceStore();
 const _neo4jGraph  = new Neo4jGraph();
+const _sleepConsolidator = new SleepConsolidator({ palaceStore: _palaceStore, graph: _neo4jGraph });
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -296,8 +298,50 @@ async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', p
   return { ...result, filed_at: { wing, hall, room, closet } };
 }
 
+async function assessExplicitRouting(palace, content, path = {}) {
+  const palaces = await _palaceStore.getAll();
+  if (palaces.length === 0) {
+    return {
+      routing_confidence: null,
+      routing_best_palace: palace,
+      needs_review: 0,
+      routing_reason: 'no_palace_registry',
+    };
+  }
+
+  const ranked = await _palaceStore.rankByContext(buildRoutingContext(content, path), palaces.length);
+  const best = ranked[0] || null;
+  const current = ranked.find((candidate) => candidate.name === palace) || null;
+  const currentScore = current?.score ?? null;
+  const bestScore = best?.score ?? null;
+  const scoreGap = bestScore !== null && currentScore !== null ? bestScore - currentScore : null;
+  const needsReview = Boolean(
+    best &&
+    best.name !== palace &&
+    bestScore !== null &&
+    bestScore >= 0.05 &&
+    scoreGap !== null &&
+    scoreGap >= 0.02
+  );
+
+  return {
+    routing_confidence: currentScore,
+    routing_best_palace: best?.name || palace,
+    needs_review: needsReview ? 1 : 0,
+    routing_reason: needsReview
+      ? 'explicit_palace_differs_from_semantic_best_match'
+      : 'explicit_palace_confirmed',
+  };
+}
+
 async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_name, room, room_id, room_name, closet, closet_id, closet_name, content, source_file, added_by = 'mcp', palace = DEFAULT_PALACE }) {
   const store = await getStore(palace);
+  const routing = await assessExplicitRouting(palace, content, {
+    wing_name: wing_name || wing,
+    hall_name: hall_name || hall,
+    room_name: room_name || room,
+    closet_name: closet_name || closet,
+  });
 
   const hash = crypto
     .createHash('md5')
@@ -321,6 +365,10 @@ async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_nam
       source_file:  source_file || '',
       added_by,
       filed_at:     new Date().toISOString(),
+      routing_confidence: routing.routing_confidence,
+      routing_best_palace: routing.routing_best_palace,
+      needs_review: routing.needs_review,
+      routing_reason: routing.routing_reason,
     }],
   };
 
@@ -358,6 +406,7 @@ async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_nam
       room: room_name || room,
       closet: closet_name || closet,
       kg_extraction: kgExtraction,
+      routing,
     };
   } catch (e) {
     if (e.message?.includes('Not Found') || e.status === 404 || e.statusCode === 404) {
@@ -397,6 +446,7 @@ async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_nam
           room: room_name || room,
           closet: closet_name || closet,
           kg_extraction: kgExtraction,
+          routing,
         };
       } catch (e2) {
         return { success: false, error: e2.message };
@@ -428,9 +478,11 @@ async function toolDeleteDrawer({ drawer_id, palace = DEFAULT_PALACE }) {
     if (!existing.ids || existing.ids.length === 0) {
       return { success: false, error: `Drawer not found: ${drawer_id}` };
     }
-    await store.delete({ ids: [drawer_id] });
-    _neo4jGraph.deleteDrawer(drawer_id).catch(() => {});
-    return { success: true, drawer_id };
+    return await _sleepConsolidator.queueDrawerDeletion({
+      drawerId: drawer_id,
+      palace,
+      reason: 'mcp_delete_drawer',
+    });
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -472,6 +524,37 @@ async function toolKgTimeline({ entity, palace = DEFAULT_PALACE } = {}) {
 async function toolKgStats({ palace = DEFAULT_PALACE } = {}) {
   const kg = getKg(palace);
   return await kg.stats();
+}
+
+async function toolAudit({ palace, limit = 100, min_score = 0.05, min_gap = 0.02 } = {}) {
+  if (!palace || !palace.trim()) {
+    return { error: 'palace is required' };
+  }
+  return _sleepConsolidator.auditPalace(palace, {
+    limit,
+    minScore: min_score,
+    minGap: min_gap,
+  });
+}
+
+async function toolConsolidate({
+  palace,
+  limit = 100,
+  max_moves = 25,
+  min_score = 0.05,
+  min_gap = 0.02,
+  dry_run = true,
+} = {}) {
+  if (!palace || !palace.trim()) {
+    return { error: 'palace is required' };
+  }
+  return _sleepConsolidator.consolidatePalace(palace, {
+    limit,
+    maxMoves: max_moves,
+    minScore: min_score,
+    minGap: min_gap,
+    dryRun: dry_run,
+  });
 }
 
 // ── Navigation Tool Handlers ────────────────────────────────────────────────
@@ -928,7 +1011,7 @@ const TOOLS = [
   },
   {
     name: 'mempalace_delete_drawer',
-    description: 'Delete a drawer by ID. Irreversible.',
+    description: 'Queue a drawer for sleep-time deletion by ID. Physical deletion happens during consolidation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -999,6 +1082,38 @@ const TOOLS = [
     description: 'Knowledge graph overview: entities, triples, current vs expired facts, relationship types.',
     inputSchema: { type: 'object', properties: {} },
     handler: toolKgStats,
+  },
+  {
+    name: 'mempalace_audit',
+    description: 'Sleep-style audit. Scan a palace for drawers that now look semantically closer to another palace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        palace: { type: 'string', description: 'Palace to audit' },
+        limit: { type: 'integer', description: 'Max drawers to scan (default 100)' },
+        min_score: { type: 'number', description: 'Minimum best-match score before flagging (default 0.05)' },
+        min_gap: { type: 'number', description: 'Minimum score gap versus current palace before flagging (default 0.02)' },
+      },
+      required: ['palace'],
+    },
+    handler: toolAudit,
+  },
+  {
+    name: 'mempalace_consolidate',
+    description: 'Sleep-style consolidation. Re-audit a palace and move flagged drawers to better-matching palaces while preserving drawer IDs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        palace: { type: 'string', description: 'Palace to consolidate' },
+        limit: { type: 'integer', description: 'Max drawers to scan (default 100)' },
+        max_moves: { type: 'integer', description: 'Max moves to apply (default 25)' },
+        min_score: { type: 'number', description: 'Minimum best-match score before flagging (default 0.05)' },
+        min_gap: { type: 'number', description: 'Minimum score gap versus current palace before flagging (default 0.02)' },
+        dry_run: { type: 'boolean', description: 'When true, only report moves without applying them (default true)' },
+      },
+      required: ['palace'],
+    },
+    handler: toolConsolidate,
   },
   {
     name: 'mempalace_traverse',
