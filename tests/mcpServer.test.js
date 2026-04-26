@@ -33,12 +33,14 @@ const EXPECTED_TOOL_NAMES = [
   'mempalace_list_identities',
   'mempalace_setup',
   'mempalace_palace_create',
+  'mempalace_diary_search',
+  'mempalace_session_summary',
 ];
 
 describe('getToolDefinitions', () => {
-  it('returns 24 tool definitions', () => {
+  it('returns 26 tool definitions', () => {
     const tools = getToolDefinitions();
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(26);
   });
 
   it('contains all expected tool names', () => {
