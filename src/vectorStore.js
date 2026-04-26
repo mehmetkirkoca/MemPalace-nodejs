@@ -73,6 +73,29 @@ export class VectorStore {
         },
       });
     }
+
+    // Payload indexes — enable order_by and facet queries (idempotent)
+    const PAYLOAD_INDEXES = [
+      { field_name: 'wing',         field_schema: 'keyword' },
+      { field_name: 'room',         field_schema: 'keyword' },
+      { field_name: 'importance',   field_schema: 'float'   },
+      { field_name: 'filed_at',     field_schema: 'keyword' },
+      { field_name: 'topic',        field_schema: 'keyword' },
+      { field_name: 'source',       field_schema: 'keyword' },
+      { field_name: 'session_date', field_schema: 'keyword' },
+      { field_name: 'session_id',   field_schema: 'keyword' },
+    ];
+    for (const { field_name, field_schema } of PAYLOAD_INDEXES) {
+      try {
+        await this._client.createPayloadIndex(this._collectionName, {
+          field_name,
+          field_schema,
+          wait: false,
+        });
+      } catch {
+        // Index already exists or collection not ready — ignore
+      }
+    }
   }
 
   async add({ ids, documents, metadatas, id, content, metadata }) {
@@ -217,6 +240,35 @@ export class VectorStore {
 
       if (!page.next_page_offset || ids.length >= limit) break;
       offset = page.next_page_offset;
+    }
+
+    return { ids, documents, metadatas };
+  }
+
+  /**
+   * Fetch documents with server-side ordering by a payload field.
+   * Requires the field to have a payload index (see init()).
+   * Returns same shape as get().
+   */
+  async getOrdered({ where, limit = 10, orderBy } = {}) {
+    const filter = convertFilter(where);
+    const scrollParams = {
+      limit,
+      with_payload: true,
+      filter,
+      order_by: orderBy, // e.g. { key: 'filed_at', direction: 'desc' }
+    };
+
+    const page = await this._client.scroll(this._collectionName, scrollParams);
+
+    const ids = [];
+    const documents = [];
+    const metadatas = [];
+    for (const point of page.points) {
+      ids.push(point.payload.original_id);
+      documents.push(point.payload.document);
+      const { document, original_id, ...rest } = point.payload;
+      metadatas.push(rest);
     }
 
     return { ids, documents, metadatas };

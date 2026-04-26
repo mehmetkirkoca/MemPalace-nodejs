@@ -47,6 +47,7 @@ services:
     volumes:
       - mempalace_data:/root/.mempalace
       - mempalace_hf_cache:/root/.cache/huggingface
+      - ${HOME}/.claude/mempalace-staging:/root/.claude/mempalace-staging
     depends_on:
       qdrant:
         condition: service_healthy
@@ -95,6 +96,7 @@ services:
       - /app/node_modules
       - mempalace_data:/root/.mempalace
       - mempalace_hf_cache:/root/.cache/huggingface
+      - ${HOME}/.claude/mempalace-staging:/root/.claude/mempalace-staging
     depends_on:
       qdrant:
         condition: service_healthy

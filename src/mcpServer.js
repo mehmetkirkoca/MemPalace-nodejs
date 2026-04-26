@@ -51,6 +51,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'crypto';
 import path from 'path';
+import os from 'os';
+import fs from 'fs';
 
 import { VectorStore } from './vectorStore.js';
 import { searchMemories } from './searcher.js';
@@ -78,14 +80,16 @@ const PALACE_PROTOCOL = `CRITICAL OPERATIONAL PROTOCOL — MemPalace Memory Syst
 3. SEARCH BEFORE GUESSING: Before stating any fact about the past, call 'mempalace_search' or 'mempalace_kg_query'. Hallucination is a protocol violation.
 4. HIERARCHICAL STORAGE: When saving new info, call 'mempalace_get_taxonomy' first to ensure correct filing, then 'mempalace_save'.
 5. KNOWLEDGE GRAPH: Use 'mempalace_kg_add' for relationship facts and 'mempalace_kg_invalidate' when facts change.
-6. AGENT DIARY: End every session by calling 'mempalace_diary_write' to record your observations and progress.
+6. AGENT DIARY: Before ending every session, call 'mempalace_diary_write(agent_name="claude", entry="...", topic="session-end")'. Include: what was worked on, key decisions made, open issues. This is MANDATORY — do not skip.
+7. SESSION SUMMARY: When you observe architecture decisions, user preferences, important bugs, or key learnings — call 'mempalace_session_summary()' IMMEDIATELY. Do NOT wait for session end. Pass only content, topic, and importance — palace and taxonomy are auto-resolved. The Stop hook bridge script ingests staged facts to Qdrant automatically with zero LLM cost.
 
 Memory Hierarchy: L0 (Who you are) + L1 (Top 15 Facts) -> L2 (Room data) -> L3 (Global Semantic Search).
 Failure to follow this protocol results in memory fragmentation and loss of agent continuity.`;
 
 // ── Lazy singletons ──────────────────────────────────────────────────────────
 
-const DEFAULT_PALACE = 'personality_memory_palace';
+const DEFAULT_PALACE   = 'personality_memory_palace';
+const SESSIONS_PALACE  = 'sessions';
 const MIN_ROUTING_MEMORY_QUALITY = 0.05;
 
 // Per-palace caches
@@ -472,7 +476,7 @@ async function toolCheckDuplicate({ content, threshold = 0.9, palace = DEFAULT_P
 
 // ── Write Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', palace }) {
+async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', palace, topic, importance, project, tags, source }) {
   if (!content || !content.trim()) return { error: 'content is required' };
   if (!palace || !palace.trim()) {
     return {
@@ -485,6 +489,12 @@ async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', p
       error: 'wing, hall, room, and closet are required',
       hint: 'Call mempalace_get_taxonomy first to see the existing hierarchy, then decide where this content belongs.',
     };
+  }
+  if (!topic || !topic.trim()) {
+    return { error: 'topic is required (kebab-case string, e.g. "diary-efficiency")' };
+  }
+  if (!importance || importance < 1 || importance > 5) {
+    return { error: 'importance is required (number 1-5, where 5=critical, 3=normal, 1=trivial)' };
   }
 
   const dup = await toolCheckDuplicate({ content, threshold: 0.9, palace });
@@ -514,6 +524,12 @@ async function toolSave({ content, wing, hall, room, closet, added_by = 'mcp', p
     room, room_id: roomId, room_name: room,
     closet, closet_id: closetId, closet_name: closet,
     content, added_by, palace,
+    topic,
+    importance,
+    project:      project || '',
+    tags:         Array.isArray(tags) ? tags.join(',') : (tags || ''),
+    source:       source || 'manual',
+    session_date: new Date().toISOString().split('T')[0],
   });
 
   return { ...result, filed_at: { wing, hall, room, closet } };
@@ -555,7 +571,7 @@ async function assessExplicitRouting(palace, content, path = {}) {
   };
 }
 
-async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_name, room, room_id, room_name, closet, closet_id, closet_name, content, source_file, added_by = 'mcp', palace = DEFAULT_PALACE }) {
+async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_name, room, room_id, room_name, closet, closet_id, closet_name, content, source_file, added_by = 'mcp', palace = DEFAULT_PALACE, topic, importance, project, tags, source, session_date }) {
   const store = await getStore(palace);
   const routing = await assessExplicitRouting(palace, content, {
     wing_name: wing_name || wing,
@@ -583,9 +599,15 @@ async function toolAddDrawer({ wing, wing_id, wing_name, hall, hall_id, hall_nam
       room_name:    room_name  || room    || 'unknown',
       closet:       closet_id  || closet  || 'unknown',
       closet_name:  closet_name || closet || 'unknown',
-      source_file:  source_file || '',
+      source_file:  source_file  || '',
       added_by,
       filed_at:     new Date().toISOString(),
+      topic:        topic        || '',
+      importance:   importance   != null ? Number(importance) : 3,
+      project:      project      || '',
+      tags:         tags         || '',
+      source:       source       || 'manual',
+      session_date: session_date || new Date().toISOString().split('T')[0],
       routing_confidence: routing.routing_confidence,
       routing_best_palace: routing.routing_best_palace,
       needs_review: routing.needs_review,
@@ -806,9 +828,39 @@ async function toolGraphStats() {
   }
 }
 
+// ── Sessions Palace Auto-Init ────────────────────────────────────────────────
+
+async function initSessionsPalace() {
+  try {
+    const already = await _palaceStore.getAll();
+    if (!already.some(p => p.name === SESSIONS_PALACE)) {
+      await _palaceStore.upsert({
+        name: SESSIONS_PALACE,
+        description: 'Agent session diaries and conversation logs',
+        keywords: ['diary', 'session', 'log', 'agent'],
+        scope: 'Agent diary entries written at the end of each session.',
+        wing_focus: null,
+        l0_body: null,
+        is_default: false,
+      });
+      _neo4jGraph.mergePalace({
+        name: SESSIONS_PALACE,
+        description: 'Agent session diaries and conversation logs',
+        scope: 'Agent diary entries written at the end of each session.',
+        is_default: false,
+      }).catch(() => {});
+      console.error(`[MemPalace] Sessions palace registered.`);
+    }
+    await getStore(SESSIONS_PALACE);
+    console.error(`[MemPalace] Sessions palace ready.`);
+  } catch (e) {
+    console.error(`[MemPalace] Sessions palace init failed (non-fatal): ${e.message}`);
+  }
+}
+
 // ── Diary Tool Handlers ─────────────────────────────────────────────────────
 
-async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general', palace = DEFAULT_PALACE }) {
+async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general', session_id, palace = SESSIONS_PALACE }) {
   const store = await getStore(palace);
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
   const room = 'diary';
@@ -821,22 +873,23 @@ async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general', 
     .slice(0, 8);
   const entryId = `diary_${wing}_${now.toISOString().replace(/[-:T]/g, '').slice(0, 15)}_${hash}`;
 
+  const metadata = {
+    wing,
+    room,
+    hall: 'hall_diary',
+    topic,
+    type: 'diary_entry',
+    agent: agent_name,
+    filed_at: now.toISOString(),
+    date: now.toISOString().split('T')[0],
+  };
+  if (session_id) metadata.session_id = session_id;
+
   try {
     await store.add({
       ids: [entryId],
       documents: [entry],
-      metadatas: [
-        {
-          wing,
-          room,
-          hall: 'hall_diary',
-          topic,
-          type: 'diary_entry',
-          agent: agent_name,
-          filed_at: now.toISOString(),
-          date: now.toISOString().split('T')[0],
-        },
-      ],
+      metadatas: [metadata],
     });
     return {
       success: true,
@@ -850,39 +903,53 @@ async function toolDiaryWrite({ agent_name = 'agent', entry, topic = 'general', 
   }
 }
 
-async function toolDiaryRead({ agent_name = 'agent', last_n = 10, palace = DEFAULT_PALACE }) {
+async function toolDiaryRead({ agent_name = 'agent', last_n = 10, session_id, palace = SESSIONS_PALACE }) {
   const store = await getStore(palace);
   const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
 
+  const whereConditions = [{ wing }, { room: 'diary' }];
+  if (session_id) whereConditions.push({ session_id });
+  const where = { $and: whereConditions };
+
   try {
-    const results = await store.get({
-      where: { $and: [{ wing }, { room: 'diary' }] },
-      limit: 10000,
-    });
+    let results;
+    let needsSort = false;
+    try {
+      // Fast path: use server-side ordering (requires filed_at payload index)
+      results = await store.getOrdered({
+        where,
+        limit: last_n,
+        orderBy: { key: 'filed_at', direction: 'desc' },
+      });
+    } catch {
+      // Fallback: payload index not yet built, use bounded fetch + JS sort
+      needsSort = true;
+      const fetchLimit = Math.min(last_n * 4, 500);
+      results = await store.get({ where, limit: fetchLimit });
+    }
 
     if (!results.ids || results.ids.length === 0) {
       return { agent: agent_name, entries: [], message: 'No diary entries yet.' };
     }
 
-    const entries = [];
-    for (let i = 0; i < results.documents.length; i++) {
-      const doc = results.documents[i];
+    const entries = results.documents.map((doc, i) => {
       const meta = results.metadatas[i];
-      entries.push({
-        date: meta.date || '',
-        timestamp: meta.filed_at || '',
-        topic: meta.topic || '',
-        content: doc,
-      });
-    }
+      return {
+        date:      meta.date      || '',
+        timestamp: meta.filed_at  || '',
+        topic:     meta.topic     || '',
+        content:   doc,
+      };
+    });
 
-    entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    if (needsSort) {
+      entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    }
     const sliced = entries.slice(0, last_n);
 
     return {
       agent: agent_name,
       entries: sliced,
-      total: results.ids.length,
       showing: sliced.length,
     };
   } catch (e) {
@@ -890,6 +957,137 @@ async function toolDiaryRead({ agent_name = 'agent', last_n = 10, palace = DEFAU
   }
 }
 
+
+async function toolDiarySearch({ agent_name = 'agent', query, limit = 5, topic, session_id, palace = SESSIONS_PALACE }) {
+  if (!query || !query.trim()) {
+    return { error: 'query is required' };
+  }
+
+  const store = await getStore(palace);
+  const wing = `wing_${agent_name.toLowerCase().replace(/ /g, '_')}`;
+
+  const whereConditions = [{ wing }, { room: 'diary' }];
+  if (topic) whereConditions.push({ topic });
+  if (session_id) whereConditions.push({ session_id });
+
+  try {
+    const results = await store.query({
+      queryTexts: [query],
+      nResults: limit,
+      where: { $and: whereConditions },
+    });
+
+    const docs   = results.documents[0] || [];
+    const metas  = results.metadatas[0] || [];
+    const dists  = results.distances[0] || [];
+
+    if (docs.length === 0) {
+      return { agent: agent_name, query, entries: [], message: 'No matching diary entries found.' };
+    }
+
+    const entries = docs.map((doc, i) => ({
+      date:       metas[i].date      || '',
+      timestamp:  metas[i].filed_at  || '',
+      topic:      metas[i].topic     || '',
+      content:    doc,
+      similarity: Math.round(dists[i] * 1000) / 1000,
+    }));
+
+    return { agent: agent_name, query, entries, showing: entries.length };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ── Session Staging Tool Handler ─────────────────────────────────────────────
+
+const STAGING_DIR = path.join(os.homedir(), '.claude', 'mempalace-staging');
+const META_PATH   = path.join(STAGING_DIR, '.last-save.json');
+
+async function toolSessionSummary({ facts }) {
+  if (!Array.isArray(facts) || facts.length === 0) {
+    return { error: 'facts must be a non-empty array' };
+  }
+
+  const qualified = facts.filter(f => f.content && (f.importance || 0) >= 3);
+  if (qualified.length === 0) {
+    return { staged: 0, message: 'No facts with importance >= 3. Nothing staged.' };
+  }
+
+  try {
+    fs.mkdirSync(STAGING_DIR, { recursive: true });
+
+    // Auto-route each fact: resolve palace via semantic routing, taxonomy via Neo4j
+    const { Embedder } = await import('./embedder.js');
+    const embedder = new Embedder();
+
+    const factsWithVectors = await Promise.all(qualified.map(async (fact) => {
+      // 1. Palace routing — semantic match against registered palaces
+      let palace = DEFAULT_PALACE;
+      try {
+        const match = await _palaceStore.selectByContext(fact.content);
+        if (match?.name) palace = match.name;
+      } catch { /* fallback to DEFAULT_PALACE */ }
+
+      // 2. Taxonomy — assign wing/hall/room/closet from Neo4j cluster store
+      let wing = 'wing_general', hall = 'hall_general', room = 'room_general', closet = 'clo_general';
+      try {
+        const clusters = new Neo4jClusterStore(palace);
+        const assigned = await clusters.assign(
+          fact.topic || 'general',
+          fact.topic || 'general',
+          fact.topic || 'general',
+          fact.topic || 'general',
+        );
+        wing   = assigned.wingId   || wing;
+        hall   = assigned.hallId   || hall;
+        room   = assigned.roomId   || room;
+        closet = assigned.closetId || closet;
+      } catch { /* fallback to defaults */ }
+
+      // 3. Pre-compute embedding (MCP server has model; bridge script does not)
+      let vector = null;
+      try {
+        vector = await embedder.embed(fact.content);
+      } catch { /* staged without vector — bridge will skip */ }
+
+      return { ...fact, palace, wing, hall, room, closet, vector };
+    }));
+
+    // Pre-compute diary entry for bridge (bridge has no embedder)
+    const projectName = process.cwd().split('/').pop() || 'unknown';
+    const topics = [...new Set(factsWithVectors.map(f => f.topic).filter(Boolean))];
+    const diaryContent = `[${new Date().toISOString().split('T')[0]}] ${projectName}: ${factsWithVectors.length} fact(s) — ${topics.join(', ')}`;
+    let diaryVector = null;
+    try { diaryVector = await embedder.embed(diaryContent); } catch { /* non-fatal */ }
+
+    const filename = `${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const filepath = path.join(STAGING_DIR, filename);
+
+    fs.writeFileSync(filepath, JSON.stringify({
+      staged_at:   new Date().toISOString(),
+      project:     process.cwd(),
+      qdrant_url:  process.env.QDRANT_URL || 'http://localhost:6333',
+      facts:       factsWithVectors,
+      diary_entry: { content: diaryContent, vector: diaryVector },
+    }, null, 2));
+
+    const embedded = factsWithVectors.filter(f => f.vector).length;
+    const routing  = factsWithVectors.map(f => ({ topic: f.topic, palace: f.palace }));
+
+    return {
+      success: true,
+      staged:  qualified.length,
+      embedded,
+      skipped: facts.length - qualified.length,
+      file:    filename,
+      routing,
+      message: `${qualified.length} facts staged (${embedded} pre-embedded). Will be ingested at session end via Stop hook.`,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
 
 // ── Memory Stack Tool Handlers ────────────────────────────────────────────────
 
@@ -941,14 +1139,25 @@ export async function illuminateMemory({ wing, context } = {}) {
   let l1 = '';
   try {
     const store = await getStore(activePalace);
-    const opts = { limit: 10000 };
-    if (l1Wing) opts.where = { wing: l1Wing };
-    const all = await store.get(opts);
+    let all;
+    try {
+      // Fast path: server-side importance ordering (requires importance payload index)
+      all = await store.getOrdered({
+        ...(l1Wing ? { where: { wing: l1Wing } } : {}),
+        limit: L1_MAX_DRAWERS,
+        orderBy: { key: 'importance', direction: 'desc' },
+      });
+    } catch {
+      // Fallback: importance index not built yet, load bounded set + JS sort
+      const opts = { limit: 200 };
+      if (l1Wing) opts.where = { wing: l1Wing };
+      all = await store.get(opts);
+    }
 
     if (!all.ids || all.ids.length === 0) {
       l1 = '## L1 — ESSENTIAL STORY\nNo memories yet. Start filing with mempalace_add_drawer.';
     } else {
-      // Score by importance field
+      // Score by importance field (needed for fallback path; getOrdered already sorted)
       const scored = [];
       for (let i = 0; i < all.documents.length; i++) {
         const doc = all.documents[i];
@@ -992,10 +1201,23 @@ export async function illuminateMemory({ wing, context } = {}) {
     l1 = `## L1 — ESSENTIAL STORY\nCould not load memories: ${e.message}`;
   }
 
+  // l1_recent_saves — show what the bridge saved in the last 7 days
+  let recentSaves = null;
+  try {
+    const meta = JSON.parse(fs.readFileSync(META_PATH, 'utf8'));
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    if (meta.last_save_date >= cutoff && meta.items_saved > 0) {
+      recentSaves = `${meta.last_save_date}: ${meta.items_saved} item saved (${(meta.topics || []).join(', ')})`;
+    }
+  } catch {
+    // No meta file yet — first run
+  }
+
   return {
     identity_selected: identitySelected,
     l0_identity: l0,
     l1_essential: l1,
+    l1_recent_saves: recentSaves,
     note: 'L2: use mempalace_recall(wing, room) for on-demand room loading. L3: use mempalace_search for semantic queries.',
   };
 }
@@ -1216,19 +1438,25 @@ const TOOLS = [
     description:
       'Save content to a specific palace. You must provide palace and the categorization (wing, hall, room, closet). ' +
       'Call mempalace_get_taxonomy first to see the existing hierarchy and decide where this belongs. ' +
-      'Deduplicates automatically and runs knowledge graph extraction/writeback on every successful save.',
+      'Deduplicates automatically and runs knowledge graph extraction/writeback on every successful save. ' +
+      'IMPORTANT: content must make sense 6 months from now without conversation context. ' +
+      'BAD: "We discussed this" — GOOD: "MemPalace diary_read uses limit:10000 — fixed to last_n*4 [2026-04-25]"',
     inputSchema: {
       type: 'object',
       properties: {
-        palace:  { type: 'string',  description: 'Target palace name, required (e.g. "news_palace")' },
-        content: { type: 'string',  description: 'Content to save — verbatim, never summarized' },
-        wing:    { type: 'string',  description: 'Broad domain (e.g. "Technology", "Health", "Personal")' },
-        hall:    { type: 'string',  description: 'Sub-domain (e.g. "Programming", "Nutrition")' },
-        room:    { type: 'string',  description: 'Specific topic (e.g. "JavaScript", "Vitamins")' },
-        closet:  { type: 'string',  description: 'Fine-grained sub-topic (e.g. "TypeScript", "Vitamin D")' },
-        added_by:{ type: 'string',  description: 'Who is saving this (default: mcp)' },
+        palace:     { type: 'string',  description: 'Target palace name, required (e.g. "news_palace")' },
+        content:    { type: 'string',  description: 'Content to save — verbatim, never summarized. Must be self-contained.' },
+        wing:       { type: 'string',  description: 'Broad domain (e.g. "Technology", "Health", "Personal")' },
+        hall:       { type: 'string',  description: 'Sub-domain (e.g. "Programming", "Nutrition")' },
+        room:       { type: 'string',  description: 'Specific topic (e.g. "JavaScript", "Vitamins")' },
+        closet:     { type: 'string',  description: 'Fine-grained sub-topic (e.g. "TypeScript", "Vitamin D")' },
+        topic:      { type: 'string',  description: 'Required. kebab-case tag (e.g. "diary-efficiency", "user-preference")' },
+        importance: { type: 'number',  description: 'Required. 1-5: 5=critical/architectural, 3=normal, 1=trivial' },
+        project:    { type: 'string',  description: 'Project name this relates to (optional, e.g. "mempalace")' },
+        tags:       { type: 'array',   items: { type: 'string' }, description: 'Search keywords (optional)' },
+        added_by:   { type: 'string',  description: 'Who is saving this (default: mcp)' },
       },
-      required: ['palace', 'content', 'wing', 'hall', 'room', 'closet'],
+      required: ['palace', 'content', 'wing', 'hall', 'room', 'closet', 'topic', 'importance'],
     },
     handler: toolSave,
   },
@@ -1375,9 +1603,10 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent_name: { type: 'string', description: 'Your name — each agent gets their own diary wing' },
-        entry: { type: 'string', description: 'Your diary entry (plain text)' },
-        topic: { type: 'string', description: 'Topic tag (optional, default: general)' },
+        agent_name: { type: 'string',  description: 'Your name — each agent gets their own diary wing' },
+        entry:      { type: 'string',  description: 'Your diary entry (plain text)' },
+        topic:      { type: 'string',  description: 'Topic tag (optional, default: general)' },
+        session_id: { type: 'string',  description: 'Session identifier to group entries from the same conversation (optional)' },
       },
       required: ['agent_name', 'entry'],
     },
@@ -1389,12 +1618,61 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent_name: { type: 'string', description: 'Your name — each agent gets their own diary wing' },
-        last_n: { type: 'integer', description: 'Number of recent entries to read (default: 10)' },
+        agent_name: { type: 'string',  description: 'Your name — each agent gets their own diary wing' },
+        last_n:     { type: 'integer', description: 'Number of recent entries to read (default: 10)' },
+        session_id: { type: 'string',  description: 'Filter entries by session identifier (optional)' },
       },
       required: ['agent_name'],
     },
     handler: toolDiaryRead,
+  },
+  {
+    name: 'mempalace_diary_search',
+    description:
+      'Semantic search within your diary entries. Use when you need to find a specific past observation, ' +
+      'decision, or fact from previous sessions. Faster than reading all entries when logs are large.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_name: { type: 'string',  description: 'Your name — searches only your own diary wing' },
+        query:      { type: 'string',  description: 'Natural language search query' },
+        limit:      { type: 'integer', description: 'Max results to return (default: 5)' },
+        topic:      { type: 'string',  description: 'Filter by topic tag (optional)' },
+        session_id: { type: 'string',  description: 'Filter by session identifier (optional)' },
+      },
+      required: ['agent_name', 'query'],
+    },
+    handler: toolDiarySearch,
+  },
+  {
+    name: 'mempalace_session_summary',
+    description:
+      'Stage important facts from the current session for Qdrant ingestion at session end (via Stop hook). ' +
+      'Call this IMMEDIATELY when you observe: architecture decisions, user preferences, important bugs, key learnings. ' +
+      'Do NOT wait for session end — extraction quality is highest when you are still in context. ' +
+      'Only facts with importance >= 3 are staged. The Stop hook bridge script ingests them to Qdrant with zero LLM cost.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        facts: {
+          type: 'array',
+          description: 'Facts to stage — palace and taxonomy are auto-resolved via semantic routing',
+          items: {
+            type: 'object',
+            properties: {
+              content:    { type: 'string', description: 'Self-contained fact — must make sense 6 months from now without context' },
+              topic:      { type: 'string', description: 'kebab-case tag (e.g. "user-preference", "architecture-decision")' },
+              importance: { type: 'number', description: '3-5 only: 5=critical/architectural, 4=important, 3=useful' },
+              project:    { type: 'string', description: 'Project name (optional)' },
+              tags:       { type: 'array',  items: { type: 'string' } },
+            },
+            required: ['content', 'importance', 'topic'],
+          },
+        },
+      },
+      required: ['facts'],
+    },
+    handler: toolSessionSummary,
   },
   {
     name: 'mempalace_illuminate',
@@ -1547,6 +1825,7 @@ export function createServer() {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function startStdio() {
+  await initSessionsPalace();
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -1554,6 +1833,7 @@ async function startStdio() {
 }
 
 async function startHTTP() {
+  await initSessionsPalace();
   const http = await import('http');
 
   const transports = {};
